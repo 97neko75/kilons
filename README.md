@@ -1,244 +1,51 @@
-# kilons
-一个遵循 Unix 设计哲学、以 POSIX 兼容为目标的操作系统。
+# kilons Milestone 7 — FAT32 read-only + visible VGA cursor
 
-没错，是操作系统，不是 Linux 发行版，更不是给 Linux 换了个名字。
+Based on M6. `make clean && make run` boots without a disk. The VGA text-mode cursor is explicitly enabled.
 
-内核是自己写的，系统也要自己做。
+## FAT32 disk testing
 
-不过先说好，现在还在开发中。想拿它当主力系统？你是不是太看得起我了？
+Create a **separate disposable raw FAT32 image**, e.g. on a Linux host with `mkfs.fat`:
 
-# 这玩意儿到底是什么？
-kilons是一个正在开发的自由开源操作系统，采用单体内核架构。
+```sh
+truncate -s 64M test-fat32.img
+mkfs.fat -F 32 -s 1 test-fat32.img
+# optionally: mcopy -i test-fat32.img README.TXT ::README.TXT
+make run DISK=test-fat32.img
+```
 
-本项目遵循以下原则：
+In the kernel debug shell:
 
-遵循 Unix 哲学：一个程序做好一件事，保持接口清晰。
+```
+mount
+fsinfo
+ls
+cat README.TXT
+```
 
-以 POSIX 为标准：优先实现标准化的系统接口。
+The image is attached as **primary IDE master**. FAT32 supports superfloppy or first FAT32 MBR partition. The implementation is intentionally read-only: `mount`, root-directory `ls` and `cat` for short 8.3 names, max file size 64 KiB. Long filenames, subdirectories, writes, GPT, AHCI, NVMe, UEFI, user mode and POSIX shell are not implemented. The QEMU ISO is a separate CD-ROM, not the FAT32 data disk. Do not attach your host's real disk.
 
-拒绝不必要的私有接口：不为某个平台的专有 API 牺牲系统设计。
+FAT32 volume must contain >= 65525 data clusters; with 64 MiB and 1 sector/cluster this is normally satisfied. The ATA PIO driver has a finite polling timeout and only supports LBA28. No writes are issued.
 
-不追求 Linux 二进制兼容：kilons 不是 Linux，也不打算假装自己是。
+Build verification is separate from actual QEMU interaction testing.
 
-不盲目堆积功能：功能可以多，但没必要把什么东西都塞进内核。
 
-当然，标准不是喊两句口号就能实现的。
+## Milestone 7 update: default ISO boot and diagnostic commands
 
-现在的 kilons 还远远没有达到完整的 POSIX 兼容水平。
+- `make run` boots only the GRUB ISO; no disk image is needed.
+- `make run-fat32 DISK=test-fat32.img` explicitly opts into the optional IDE FAT32 disk. Use only a disposable image.
+- `status` summarizes PIT, memory, and thread counts.
+- `sleep 1` through `sleep 10` provides a timer/interrupt responsiveness check (not a POSIX sleep utility).
+- `console_init()` already enables the VGA hardware cursor; visibility depends on QEMU's VGA display, not the serial log.
+- FAT32 code and existing commands remain intact.
 
-# 这玩意儿能干啥？
+This update is compiled and linked, but not runtime-tested under QEMU in this environment.
 
-功能
 
-状态
+## Milestone 7 next: kernel diagnostics
 
-amd64 64 位内核启动
-
-✅ 已实现
-
-Multiboot2 / GRUB 引导
-
-✅ 已实现
-
-物理页内存分配
-
-✅ 基础实现
-
-虚拟内存映射
-
-✅ 基础实现
-
-内核堆
-
-✅ 基础实现
-
-GDT / TSS / IDT
-
-✅ 已实现
-
-PIC / PIT 定时器
-
-✅ 已实现
-
-PS/2 键盘输入
-
-✅ 已实现
-
-内核线程
-
-✅ 协作式调度
-
-线程睡眠与唤醒
-
-🧪 实验性
-
-交互式内核调试 Shell
-
-✅ 基础可用
-
-FAT32
-
-🧪 只读代码，尚未充分验证
-
-抢占式调度
-
-⏳ 未实现
-
-Ring 3 用户态进程
-
-⏳ 未实现
-
-ELF64 用户程序加载
-
-⏳ 未实现
-
-POSIX 系统调用
-
-⏳ 未实现
-
-看起来不少？
-
-别高兴得太早。这距离一个完整可用的操作系统还有很长的路要走。
-
-# 支持的平台
-架构
-
-支持情况
-
-amd64 / x86-64
-
-正在开发，优先支持
-
-aarch64
-
-计划支持
-
-loongarch64
-
-计划支持
-
-32 位架构
-
-不计划支持
-
-# Shell
-
-目前 kilons 提供的是内核调试 Shell，不是 POSIX Shell。先别急着敲 ls
-
-不要因为它长得像 Shell，就以为能直接执行 GNU 工具。
-
-现在还没有用户态程序执行环境呢。
-
-真正的 Shell 将在用户态进程、文件描述符、系统调用和程序加载机制完成后逐步实现。
-
-# 怎么编译？
-
-ubuntu
-sudo apt update
-sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
-
-然后克隆仓库：
-
-git clone https://github.com/97neko75/kilons.git
-cd kilons
-
-在包含 Makefile 的源码版本中执行：
-
-make
-make iso
-make run
-
-如果一切顺利，就能看到 kilons 启动。
-
-如果报错，请先检查构建依赖、编译器版本和源码分支。
-
-别看见错误就直接认定是内核炸了。说不定只是你没装工具呢？
-
-
-# 文件系统
-
-目前项目包含实验性的 FAT32 只读代码。
-
-但这不代表 FAT32 已经完整支持，更不代表可以安全地往真实硬盘写数据。
-
-FAT32 的实现与测试仍将继续完善。
-
-长期计划还包括支持 ext4，作为系统早期使用的主要文件系统。
-
-至于自研文件系统？
-
-以后再说。总不能操作系统还没做好，就先给自己挖一座山吧。
-
-# GNU 工具链与软件生态
-
-kilons 的目标是让符合标准接口要求的软件能够逐步移植到系统上。
-
-包括 GNU 工具链、常见 Unix 命令行工具，以及 Vim 等开发软件。
-
-但是：
-
-允许软件在 kilons 上运行，不代表把整个 GNU 工具链塞进内核源码。
-
-内核就是内核，用户态软件就是用户态软件。
-
-职责分明，不要互相抢饭碗。
-
-同样，Linux 专有系统调用和非标准接口不属于 kilons 的兼容目标。
-
-需要使用这些接口的软件，可以自行适配到标准接口。
-
-# 开源许可证
-
-kilons 使用 Mozilla Public License 2.0（MPL-2.0）。
-
-完整许可条款请参阅仓库中的 LICENSE。
-
-# 注意
-
-本项目仍处于早期实验阶段。
-
-不保证数据安全、系统稳定性、硬件兼容性或 POSIX 完整符合性。
-
-请优先使用虚拟机进行测试，不要把重要数据交给一个尚未完成的操作系统。
-
-出了问题可以报告 Bug，但请不要指望它现在就比成熟系统可靠。
-
-我自己都还在写呢。
-
-# 作者的话
-
-为什么要开发 kilons？
-
-因为我想拥有一个属于自己的操作系统。
-
-不是修改 Linux 的发行版，不是给已有内核套上一层界面，而是从底层开始，逐渐建立一套能够真正使用的系统。
-
-我并不认为自己需要重新发明所有东西。
-
-Unix 已经给出了相当成熟的设计思想，POSIX 也提供了明确的标准接口。
-
-既然有标准，那就尽可能遵循标准。
-
-我想做的是一个有自己实现、有自己取舍，同时尊重通用标准的系统。
-
-它不一定拥有庞大的软件生态，也不一定适合所有人。
-
-但希望它最终能启动、能读写文件、能运行程序，能作为一套真正的操作系统使用。
-
-至于什么时候完成？
-
-不知道。
-
-操作系统又不是写两千行代码就能毕业的课程作业。
-
-慢慢来，总得先让它跑起来。
-
-# 最后
-
-如果你看到了这里，说明你至少愿意了解这个还没长大的操作系统。
-
-欢迎研究源码、提交问题，以及参与开发。
-
-喜欢的话，可以给个 Star。（给star的会变可爱哦～）
-
-不喜欢也没关系。（呜呜呜呜）
+- `threadstats`: scheduler switch/sleep/wakeup counters and per-slot scheduling counts.
+- `selftest`: non-destructive physical page allocation/free test and PIT progression test.
+- FAT32 driver remains unchanged and is **not** exercised by default.
+- `make run` continues to boot only the ISO.
+- This is still a cooperative kernel, **not** Ring 3, ELF user process support or a POSIX shell.
+- QEMU boot and interactive behavior need testing on a machine with QEMU and GRUB tools.
