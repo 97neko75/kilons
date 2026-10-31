@@ -121,7 +121,7 @@ loongarch64
 
 不计划支持
 
-#Shell
+# Shell
 
 目前 kilons 提供的是内核调试 Shell，不是 POSIX Shell。先别急着敲 ls
 
