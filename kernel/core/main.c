@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <kilons/console.h>
+#include <kilons/version.h>
 #include <kilons/serial.h>
 #include <kilons/memory.h>
 #include <kilons/keyboard.h>
@@ -9,6 +10,7 @@
 #include <kilons/tss.h>
 #include <kilons/scheduler.h>
 #include <kilons/shell.h>
+#include <kilons/ramfs.h>
 static void print_number(uint64_t n) {
     char buf[21]; unsigned i = sizeof(buf)-1; buf[i]=0;
     do { buf[--i]=(char)('0'+n%10); n/=10; } while (n);
@@ -19,7 +21,7 @@ static void worker_a(void) { for (;;) { thread_sleep(10); } }
 static void worker_b(void) { for (;;) { thread_sleep(25); } }
 void kernel_main(uint32_t multiboot_info_phys) {
     serial_init(); console_init();
-    console_write("kilons: amd64 long mode entered\n");
+    console_write("kilons " KILONS_VERSION_STRING ": amd64 long mode entered\n");
     if (!memory_init(multiboot_info_phys)) {
         console_write("kilons: ERROR invalid Multiboot2 memory map\n"); halt();
     }
@@ -57,5 +59,7 @@ void kernel_main(uint32_t multiboot_info_phys) {
         console_write("kilons: ERROR creating worker threads\n"); halt();
     }
     console_write("kilons: cooperative scheduler and timed sleeping initialized\n");
+    ramfs_init();
+    console_write("kilons: experimental RAMFS initialized (volatile memory only)\n");
     debug_shell_run();
 }

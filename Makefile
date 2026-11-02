@@ -3,7 +3,7 @@ LD ?= ld
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -ffreestanding -fno-stack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mgeneral-regs-only -mcmodel=kernel -Ikernel/include
 ASFLAGS := -m64
 BUILD := build
-OBJS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/context.o $(BUILD)/shell.o $(BUILD)/fat32.o
+OBJS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/context.o $(BUILD)/shell.o $(BUILD)/fat32.o $(BUILD)/ramfs.o
 .PHONY: all clean iso run run-fat32
 all: $(BUILD)/kilons.elf
 $(BUILD):
@@ -35,6 +35,8 @@ $(BUILD)/scheduler.o: kernel/process/scheduler.c | $(BUILD)
 $(BUILD)/shell.o: kernel/debug/shell.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/fat32.o: kernel/filesystem/fat32.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/ramfs.o: kernel/filesystem/ramfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/context.o: boot/amd64/context.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@

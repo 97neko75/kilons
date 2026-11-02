@@ -18,7 +18,7 @@ static const char shifted_digits[13] = {0}; /* shifted punctuation handled expli
 static uint8_t shift, caps, extended;
 static char decode(uint8_t sc) {
     if (sc == 0xe0 || sc == 0xe1) { extended = 1; return 0; }
-    if (extended) { extended = 0; if (sc == 0x48) return 17; if (sc == 0x50) return 18; return 0; }
+    if (extended) { extended = 0; if (sc & 0x80) return 0; if (sc == 0x48) return 17; if (sc == 0x50) return 18; if (sc == 0x4b) return 19; if (sc == 0x4d) return 20; if (sc == 0x47) return 21; if (sc == 0x4f) return 22; if (sc == 0x53) return 23; return 0; }
     if ((sc & 0x7f) == 0x2a || (sc & 0x7f) == 0x36) {
         shift = (sc & 0x80) ? 0 : 1; return 0;
     }

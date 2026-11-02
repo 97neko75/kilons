@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <kilons/shell.h>
+#include <kilons/version.h>
 #include <kilons/console.h>
 #include <kilons/keyboard.h>
 #include <kilons/interrupt.h>
@@ -8,6 +9,7 @@
 #include <kilons/heap.h>
 #include <kilons/scheduler.h>
 #include <kilons/fat32.h>
+#include <kilons/ramfs.h>
 #define LINE_MAX 128
 #define HISTORY_MAX 8
 static char history[HISTORY_MAX][LINE_MAX];
@@ -30,11 +32,11 @@ static void run(char *line) {
     char *arg=cmd;
     while(*arg && !space(*arg)) arg++;
     if (*arg) { *arg++=0; arg=trim(arg); }
-    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest mount fsinfo ls cat about halt\n");
+    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest ramtest ramfiles mount fsinfo ls cat about halt\n");
     else if (same(cmd,"clear")) console_clear();
     else if (same(cmd,"echo")) { console_write(arg); console_putc('\n'); }
-    else if (same(cmd,"uname")) console_write("kilons amd64 (early kernel)\n");
-    else if (same(cmd,"about")) console_write("kilons milestone 7: kernel debug shell, not a POSIX shell\n");
+    else if (same(cmd,"uname")) { console_write("kilons " KILONS_VERSION_STRING " amd64 (early kernel)\n"); }
+    else if (same(cmd,"about")) { console_write("kilons " KILONS_VERSION_STRING ": kernel debug shell, not a POSIX shell\n"); }
     else if (same(cmd,"ticks")) { console_write("PIT ticks: "); number(interrupt_ticks()); console_putc('\n'); }
     else if (same(cmd,"uptime")) { console_write("Uptime (nominal seconds): "); number(interrupt_ticks()/100); console_putc('\n'); }
     else if (same(cmd,"mem") || same(cmd,"free")) { console_write("Free 4KiB physical pages: "); number(memory_free_pages()); console_putc('\n'); }
@@ -90,6 +92,8 @@ static void run(char *line) {
         console_write("PIT advanced by >=10 ticks: "); console_write(clock_ok?"PASS\n":"FAIL\n");
         console_write(page_ok && clock_ok ? "Selftest passed\n" : "Selftest failed\n");
     }
+    else if (same(cmd,"ramtest")) console_write(ramfs_selftest()?"RAMFS open/write/seek/read/close/unlink: PASS\n":"RAMFS selftest: FAIL\n");
+    else if (same(cmd,"ramfiles")) { console_write("RAMFS files: "); number(ramfs_file_count()); console_write(" / 16 (volatile)\n"); }
     else if (same(cmd,"vm")) console_write("Bootstrap virtual mapping and heap initialized\n");
     else if (same(cmd,"history")) { for(unsigned i=0;i<hist_count;i++) { number(i+1); console_write("  "); console_write(history[i]); console_putc('\n'); } }
     else if (same(cmd,"mount")) console_write(fat32_mount()?"FAT32 mounted read-only\n":"FAT32 mount failed (attach a FAT32 IDE disk)\n");
@@ -109,31 +113,68 @@ static void save_history(const char *line) {
     while(line[i] && i<LINE_MAX-1) { history[hist_count][i]=line[i]; i++; }
     history[hist_count][i]=0; hist_count++;
 }
-static void replace_line(char *line,unsigned *len,const char *new_line) {
-    while(*len) { console_putc('\b'); (*len)--; }
-    while(new_line[*len] && *len<LINE_MAX-1) { line[*len]=new_line[*len]; console_putc(line[*len]); (*len)++; }
+/* The VGA backspace operation ERASES a cell. Never use it for cursor motion.
+ * Repaint only the editable input, preserving the prompt to its left. */
+static void move_left(unsigned count) {
+    while (count--) console_cursor_left();
+}
+static void move_right(unsigned count) {
+    while (count--) console_cursor_right();
+}
+static void redraw_line(const char *line, unsigned len, unsigned cursor,
+                        unsigned old_len, unsigned old_cursor) {
+    move_left(old_cursor);
+    for (unsigned i=0; i<len; ++i) console_putc(line[i]);
+    for (unsigned i=len; i<old_len; ++i) console_putc(' ');
+    move_left((len>old_len ? len : old_len) - cursor);
+}
+static void replace_line(char *line,unsigned *len,unsigned *cursor,const char *new_line) {
+    unsigned old_len=*len, old_cursor=*cursor;
+    unsigned n=0;
+    while(new_line[n] && n<LINE_MAX-1) { line[n]=new_line[n]; n++; }
+    line[n]=0;
+    *len=n; *cursor=n;
+    redraw_line(line,n,n,old_len,old_cursor);
 }
 void debug_shell_run(void) {
     console_write("kilons: interactive kernel debug shell (US PS/2)\n");
     console_write("Type help. This is NOT a POSIX shell.\nkilons> ");
-    char line[LINE_MAX]={0}; unsigned len=0;
+    char line[LINE_MAX]={0}; unsigned len=0, cursor=0;
     unsigned history_pos=0;
-    for(;;) {
+    for (;;) {
         char ch=keyboard_poll();
         if (!ch) { thread_yield(); continue; }
-        if (ch=='\b') { if(len) { len--; console_putc('\b'); } }
-        else if (ch=='\n') {
+        if (ch=='\n') {
+            move_right(len-cursor);
             console_putc('\n'); line[len]=0; save_history(line); run(line);
-            len=0; history_pos=hist_count; console_write("kilons> ");
-        } else if (ch==17) { /* Up */
-            if (history_pos) { history_pos--; replace_line(line,&len,history[history_pos]); }
-        } else if (ch==18) { /* Down */
-            if (history_pos<hist_count) {
+            len=0; cursor=0; line[0]=0; history_pos=hist_count;
+            console_write("kilons> ");
+        } else if (ch==17 || ch==18) {
+            if (ch==17 && history_pos) {
+                history_pos--; replace_line(line,&len,&cursor,history[history_pos]);
+            } else if (ch==18 && history_pos<hist_count) {
                 history_pos++;
-                replace_line(line,&len,history_pos==hist_count ? "" : history[history_pos]);
+                replace_line(line,&len,&cursor,history_pos==hist_count ? "" : history[history_pos]);
             }
+        } else if (ch==19 && cursor) { console_cursor_left(); cursor--; }
+        else if (ch==20 && cursor<len) { console_cursor_right(); cursor++; }
+        else if (ch==21) { move_left(cursor); cursor=0; }
+        else if (ch==22) { move_right(len-cursor); cursor=len; }
+        else if (ch=='\b' && cursor) {
+            unsigned old_len=len, old_cursor=cursor;
+            for (unsigned i=cursor-1;i<len;i++) line[i]=line[i+1];
+            cursor--; len--;
+            redraw_line(line,len,cursor,old_len,old_cursor);
+        } else if (ch==23 && cursor<len) {
+            unsigned old_len=len, old_cursor=cursor;
+            for (unsigned i=cursor;i<len;i++) line[i]=line[i+1];
+            len--;
+            redraw_line(line,len,cursor,old_len,old_cursor);
         } else if(ch>=32 && ch<=126 && len<LINE_MAX-1) {
-            line[len++]=ch; console_putc(ch);
+            unsigned old_len=len, old_cursor=cursor;
+            for (unsigned i=len;i>cursor;i--) line[i]=line[i-1];
+            line[cursor]=ch; len++; cursor++; line[len]=0;
+            redraw_line(line,len,cursor,old_len,old_cursor);
         }
     }
 }

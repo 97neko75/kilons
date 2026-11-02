@@ -53,3 +53,15 @@ void console_putc(char ch) {
     putc_screen(ch);
 }
 void console_write(const char *text) { while (*text) console_putc(*text++); }
+
+/* Shell line editing must never use destructive backspace for navigation. */
+void console_cursor_left(void) {
+    if (col) --col;
+    else if (row) { --row; col = WIDTH - 1; }
+    cursor_update();
+}
+void console_cursor_right(void) {
+    if (col < WIDTH) ++col;
+    else if (row < HEIGHT - 1) { ++row; col = 0; }
+    cursor_update();
+}
