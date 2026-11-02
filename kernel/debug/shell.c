@@ -3,6 +3,7 @@
 #include <kilons/shell.h>
 #include <kilons/version.h>
 #include <kilons/console.h>
+#include <kilons/serial.h>
 #include <kilons/keyboard.h>
 #include <kilons/interrupt.h>
 #include <kilons/memory.h>
@@ -131,8 +132,8 @@ static void move_right(unsigned count) {
 static void redraw_line(const char *line, unsigned len, unsigned cursor,
                         unsigned old_len, unsigned old_cursor) {
     move_left(old_cursor);
-    for (unsigned i=0; i<len; ++i) console_putc(line[i]);
-    for (unsigned i=len; i<old_len; ++i) console_putc(' ');
+    for (unsigned i=0; i<len; ++i) console_screen_putc(line[i]);
+    for (unsigned i=len; i<old_len; ++i) console_screen_putc(' ');
     move_left((len>old_len ? len : old_len) - cursor);
 }
 static void replace_line(char *line,unsigned *len,unsigned *cursor,const char *new_line) {
@@ -153,7 +154,10 @@ void debug_shell_run(void) {
         if (!ch) { thread_yield(); continue; }
         if (ch=='\n') {
             move_right(len-cursor);
-            console_putc('\n'); line[len]=0; save_history(line); run(line);
+            line[len]=0;
+            /* Emit the completed command exactly once on the serial log. */
+            serial_write(line);
+            console_putc('\n'); save_history(line); run(line);
             len=0; cursor=0; line[0]=0; history_pos=hist_count;
             console_write("kilons> ");
         } else if (ch==17 || ch==18) {

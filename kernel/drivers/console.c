@@ -53,6 +53,8 @@ void console_putc(char ch) {
     putc_screen(ch);
 }
 void console_write(const char *text) { while (*text) console_putc(*text++); }
+/* VGA-only painting: never mirror interactive redraws to serial. */
+void console_screen_putc(char ch) { putc_screen(ch); }
 
 /* Shell line editing must never use destructive backspace for navigation. */
 void console_cursor_left(void) {
