@@ -10,6 +10,7 @@
 #include <kilons/scheduler.h>
 #include <kilons/fat32.h>
 #include <kilons/ramfs.h>
+#include <kilons/power.h>
 #define LINE_MAX 128
 #define HISTORY_MAX 8
 static char history[HISTORY_MAX][LINE_MAX];
@@ -32,7 +33,7 @@ static void run(char *line) {
     char *arg=cmd;
     while(*arg && !space(*arg)) arg++;
     if (*arg) { *arg++=0; arg=trim(arg); }
-    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest ramtest ramfiles mount fsinfo ls cat about halt\n");
+    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest ramtest ramfiles mount fsinfo ls cat about halt shutdown poweroff\n");
     else if (same(cmd,"clear")) console_clear();
     else if (same(cmd,"echo")) { console_write(arg); console_putc('\n'); }
     else if (same(cmd,"uname")) { console_write("kilons " KILONS_VERSION_STRING " amd64 (early kernel)\n"); }
@@ -100,6 +101,12 @@ static void run(char *line) {
     else if (same(cmd,"fsinfo")) fat32_info();
     else if (same(cmd,"ls")) fat32_ls();
     else if (same(cmd,"cat")) fat32_cat(arg);
+    else if (same(cmd,"shutdown") || same(cmd,"poweroff")) {
+        if (*arg) { console_write("Usage: shutdown\n"); return; }
+        console_write("kilons: requesting ACPI S5 power off...\n");
+        if (!power_shutdown()) console_write("kilons: ACPI power off unavailable or failed; CPU halted.\n");
+        halt();
+    }
     else if (same(cmd,"halt")) { console_write("CPU halted. Close QEMU to exit.\n"); halt(); }
     else console_write("Unknown command. Type help.\n");
 }
