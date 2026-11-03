@@ -3,7 +3,7 @@ LD ?= ld
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -ffreestanding -fno-stack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mgeneral-regs-only -mcmodel=kernel -Ikernel/include
 ASFLAGS := -m64
 BUILD := build
-OBJS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/context.o $(BUILD)/shell.o $(BUILD)/fat32.o $(BUILD)/ramfs.o $(BUILD)/power.o
+OBJS := $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/context.o $(BUILD)/shell.o $(BUILD)/fat32.o $(BUILD)/ramfs.o $(BUILD)/vfs.o $(BUILD)/power.o
 .PHONY: all clean iso run run-fat32
 all: $(BUILD)/kilons.elf
 $(BUILD):
@@ -37,6 +37,8 @@ $(BUILD)/shell.o: kernel/debug/shell.c | $(BUILD)
 $(BUILD)/fat32.o: kernel/filesystem/fat32.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/ramfs.o: kernel/filesystem/ramfs.c | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/vfs.o: kernel/filesystem/vfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/power.o: kernel/arch/amd64/power.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

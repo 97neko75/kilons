@@ -11,6 +11,7 @@
 #include <kilons/scheduler.h>
 #include <kilons/fat32.h>
 #include <kilons/ramfs.h>
+#include <kilons/vfs.h>
 #include <kilons/power.h>
 #define LINE_MAX 128
 #define HISTORY_MAX 8
@@ -34,7 +35,7 @@ static void run(char *line) {
     char *arg=cmd;
     while(*arg && !space(*arg)) arg++;
     if (*arg) { *arg++=0; arg=trim(arg); }
-    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest ramtest ramfiles mount fsinfo ls cat about halt shutdown poweroff\n");
+    if (same(cmd,"help")) console_write("help clear echo uname uptime ticks mem free heap ps threads sched vm history sleep status threadstats selftest ramtest ramfiles vfstest mount fsinfo ls cat about halt shutdown poweroff\n");
     else if (same(cmd,"clear")) console_clear();
     else if (same(cmd,"echo")) { console_write(arg); console_putc('\n'); }
     else if (same(cmd,"uname")) { console_write("kilons " KILONS_VERSION_STRING " amd64 (early kernel)\n"); }
@@ -95,6 +96,7 @@ static void run(char *line) {
         console_write(page_ok && clock_ok ? "Selftest passed\n" : "Selftest failed\n");
     }
     else if (same(cmd,"ramtest")) console_write(ramfs_selftest()?"RAMFS open/write/seek/read/close/unlink: PASS\n":"RAMFS selftest: FAIL\n");
+    else if (same(cmd,"vfstest")) console_write(vfs_selftest()?"VFS /tmp open/write/seek/read/close/unlink: PASS\n":"VFS selftest: FAIL\n");
     else if (same(cmd,"ramfiles")) { console_write("RAMFS files: "); number(ramfs_file_count()); console_write(" / 16 (volatile)\n"); }
     else if (same(cmd,"vm")) console_write("Bootstrap virtual mapping and heap initialized\n");
     else if (same(cmd,"history")) { for(unsigned i=0;i<hist_count;i++) { number(i+1); console_write("  "); console_write(history[i]); console_putc('\n'); } }

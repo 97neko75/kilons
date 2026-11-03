@@ -11,6 +11,7 @@
 #include <kilons/scheduler.h>
 #include <kilons/shell.h>
 #include <kilons/ramfs.h>
+#include <kilons/vfs.h>
 static void print_number(uint64_t n) {
     char buf[21]; unsigned i = sizeof(buf)-1; buf[i]=0;
     do { buf[--i]=(char)('0'+n%10); n/=10; } while (n);
@@ -60,6 +61,7 @@ void kernel_main(uint32_t multiboot_info_phys) {
     }
     console_write("kilons: cooperative scheduler and timed sleeping initialized\n");
     ramfs_init();
+    vfs_init();
     console_write("kilons: experimental RAMFS initialized (volatile memory only)\n");
     debug_shell_run();
 }

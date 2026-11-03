@@ -6,15 +6,6 @@ header_start:
 .long 0
 .long header_end - header_start
 .long -(0xe85250d6 + 0 + (header_end - header_start))
-/* Multiboot2 console flags: request EGA/VGA text console, not a graphical framebuffer.
- * Type 4, optional tag (flags=1), size=12; bit 1 = EGA text supported.
- * Bit 0 instead means console is required, and must not be set here.
- * Do not add a framebuffer request tag: some legacy BIOSes cannot supply it. */
-.short 4
-.short 1
-.long 12
-.long 2
-.align 8
 .short 0
 .short 0
 .long 8
