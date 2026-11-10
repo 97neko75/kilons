@@ -38,12 +38,12 @@ kilons是一个正在开发的自由开源操作系统，采用单体内核架�
 
 ## 怎么编译？
 
-ubuntu
-
-```bash
+```Ubuntu 26.04
 sudo apt update
 sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
 ```
+
+(因为开发者用的就是这个，我也不想测试其他的了，有问题的话，不妨试试我这个版本吧)
 
 然后克隆仓库：
 
