@@ -9,9 +9,10 @@
 #include <kilons/heap.h>
 #include <kilons/tss.h>
 #include <kilons/scheduler.h>
-#include <kilons/shell.h>
+#include <kilons/ring3.h>
 #include <kilons/ramfs.h>
 #include <kilons/vfs.h>
+#include <kilons/block.h>
 static void print_number(uint64_t n) {
     char buf[21]; unsigned i = sizeof(buf)-1; buf[i]=0;
     do { buf[--i]=(char)('0'+n%10); n/=10; } while (n);
@@ -59,9 +60,17 @@ void kernel_main(uint32_t multiboot_info_phys) {
     if (thread_create(worker_a)<0 || thread_create(worker_b)<0) {
         console_write("kilons: ERROR creating worker threads\n"); halt();
     }
-    console_write("kilons: cooperative scheduler and timed sleeping initialized\n");
+    console_write("kilons: kernel cooperative threads and timed sleeping initialized\n");
+    block_init();
+    if(!block_selftest()) {console_write("kilons: ERROR block layer self-test failed\n");halt();}
+    console_write("kilons: block RAM device self-test passed\n");
     ramfs_init();
     vfs_init();
     console_write("kilons: experimental RAMFS initialized (volatile memory only)\n");
-    debug_shell_run();
+    /* ATAPI/ISO9660 experimental probing is suspended for this milestone. */
+    console_write("kilons: VFS regression ");
+    console_write(vfs_selftest() ? "PASS\n" : "FAIL\n");
+    console_write("kilons: RAMFS regression ");
+    console_write(ramfs_selftest() ? "PASS\n" : "FAIL\n");
+    ring3_boot();
 }

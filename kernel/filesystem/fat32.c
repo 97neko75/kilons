@@ -1,10 +1,10 @@
 #include <stdint.h>
 #include <stddef.h>
-#include <kilons/io.h>
+
 #include <kilons/console.h>
 #include <kilons/fat32.h>
+#include <kilons/ata_pio.h>
 /* ATA primary master, legacy PIO, read-only, LBA28. QEMU -drive if=ide,index=0. */
-#define ATA 0x1f0
 #define SECTOR 512u
 static uint8_t sector[SECTOR];
 static uint8_t fatsector[SECTOR];
@@ -12,27 +12,8 @@ static uint32_t fat_cache_lba=0xffffffffu;
 static uint32_t volume, fat_start, data_start, clusters, root, fat_sectors;
 static uint8_t spc, fats;
 static int mounted;
-static int ata_wait(int data) {
-    for (unsigned i=0;i<1000000;i++) {
-        uint8_t s=inb(ATA+7);
-        if (!(s&0x80)) {
-            if (s&0x21) return 0;
-            if (!data || (s&0x08)) return 1;
-        }
-    }
-    return 0;
-}
 static int read_sector(uint32_t lba,uint8_t *dst) {
-    if (lba>=0x10000000u) return 0;
-    outb(ATA+6,(uint8_t)(0xe0 | ((lba>>24)&15)));
-    outb(ATA+2,1);
-    outb(ATA+3,(uint8_t)lba);
-    outb(ATA+4,(uint8_t)(lba>>8));
-    outb(ATA+5,(uint8_t)(lba>>16));
-    outb(ATA+7,0x20);
-    if (!ata_wait(1)) return 0;
-    for(unsigned i=0;i<256;i++) { uint16_t v=inw(ATA); dst[i*2]=(uint8_t)v; dst[i*2+1]=(uint8_t)(v>>8); }
-    return 1;
+    return ata_pio_read28(lba,dst);
 }
 static uint16_t rd16(const uint8_t *p) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }

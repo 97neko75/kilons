@@ -22,7 +22,8 @@ _start:
     jne boot_fail
     /* Preserve Multiboot2 information pointer for the C entry. */
     movl %ebx, boot_info_ptr
-    /* Build identity mapping of first 1 GiB with 2 MiB pages. */
+    /* Identity-map the first 4 GiB. ACPI firmware tables on real PCs can
+     * reside above 1 GiB; retain pd as the first GiB for vm_init(). */
     movl $pml4, %edi
     movl $pdpt, %eax
     orl $3, %eax
@@ -31,12 +32,33 @@ _start:
     movl $pd, %eax
     orl $3, %eax
     movl %eax, (%edi)
+    movl $pd1, %eax
+    orl $3, %eax
+    movl %eax, pdpt+8
+    movl $pd2, %eax
+    orl $3, %eax
+    movl %eax, pdpt+16
+    movl $pd3, %eax
+    orl $3, %eax
+    movl %eax, pdpt+24
     xorl %ecx, %ecx
 1:
     movl %ecx, %eax
     shll $21, %eax
     orl $0x83, %eax
     movl %eax, pd(,%ecx,8)
+    movl %ecx, %eax
+    shll $21, %eax
+    orl $0x40000083, %eax
+    movl %eax, pd1(,%ecx,8)
+    movl %ecx, %eax
+    shll $21, %eax
+    orl $0x80000083, %eax
+    movl %eax, pd2(,%ecx,8)
+    movl %ecx, %eax
+    shll $21, %eax
+    orl $0xc0000083, %eax
+    movl %eax, pd3(,%ecx,8)
     incl %ecx
     cmpl $512, %ecx
     jne 1b
@@ -90,6 +112,9 @@ gdt_pointer:
 pml4: .skip 4096
 pdpt: .skip 4096
 pd:   .skip 4096
+pd1:  .skip 4096
+pd2:  .skip 4096
+pd3:  .skip 4096
 .align 16
 stack_bottom: .skip 16384
 stack_top:

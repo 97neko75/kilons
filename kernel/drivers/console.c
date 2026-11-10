@@ -47,9 +47,51 @@ static void putc_screen(char ch) {
     }
     cursor_update();
 }
+/* A small ANSI CSI interpreter keeps the VGA view synchronized with the
+ * serial terminal. PKS uses cursor-left/right and erase-to-end-of-line for
+ * in-place editing. Ordinary output still passes through unchanged. */
+static unsigned csi_state, csi_count, csi_value;
+static void cursor_left_n(unsigned n) {
+    while (n--) {
+        if (col) --col;
+        else if (row) { --row; col = WIDTH - 1; }
+    }
+    cursor_update();
+}
+static void cursor_right_n(unsigned n) {
+    while (n--) {
+        if (col < WIDTH - 1) ++col;
+        else if (row < HEIGHT - 1) { ++row; col = 0; }
+    }
+    cursor_update();
+}
 void console_putc(char ch) {
+    /* Serial receives complete ANSI escapes for a standard terminal. */
     if (ch == '\b') serial_write("\b \b");
     else { char s[2] = {ch, 0}; serial_write(s); }
+    if (csi_state == 1) {
+        csi_state = ch == '[' ? 2u : 0u;
+        csi_value = 0; csi_count = 0;
+        return;
+    }
+    if (csi_state == 2) {
+        if (ch >= '0' && ch <= '9') {
+            if (csi_value < 1000) csi_value = csi_value * 10u + (unsigned)(ch - '0');
+            ++csi_count;
+            return;
+        }
+        unsigned n = csi_count ? csi_value : 1u;
+        if (ch == 'D') cursor_left_n(n);
+        else if (ch == 'C') cursor_right_n(n);
+        else if (ch == 'K' && (csi_value == 0 || csi_count == 0)) {
+            for (size_t x = col; x < WIDTH; ++x)
+                vga[row * WIDTH + x] = (uint16_t)((color << 8) | ' ');
+            cursor_update();
+        }
+        csi_state = 0;
+        return;
+    }
+    if (ch == 27) { csi_state = 1; return; }
     putc_screen(ch);
 }
 void console_write(const char *text) { while (*text) console_putc(*text++); }

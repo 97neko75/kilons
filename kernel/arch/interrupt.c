@@ -1,36 +1,58 @@
 #include <stdint.h>
+#include <stddef.h>
 #include <kilons/io.h>
 #include <kilons/console.h>
 #include <kilons/interrupt.h>
 #include <kilons/keyboard.h>
+#include <kilons/ring3.h>
+
+/*2026\11\9彩蛋！这是开发者的话！
+ * 这个操作系统。。。。。。
+ * 还行哦，等v1.0的时候，我一定会当作主力系统的！*/
 
 struct __attribute__((packed)) gate { uint16_t low; uint16_t selector; uint8_t ist; uint8_t flags; uint16_t mid; uint32_t high; uint32_t reserved; };
 struct __attribute__((packed)) idtr { uint16_t limit; uint64_t base; };
 static struct gate idt[256];
 extern void (*interrupt_stub_table[48])(void);
+extern void ring3_syscall_stub(void);
 static volatile uint64_t ticks;
 /* 15 pushed registers, followed by vector, error code, RIP, CS, RFLAGS. */
-struct frame { uint64_t regs[15]; uint64_t vector, error, rip, cs, flags; };
+struct frame { uint64_t regs[15]; uint64_t vector,error,rip,cs,flags,rsp,ss; };
+_Static_assert(offsetof(struct frame,vector)==120, "IRQ vector offset");
+_Static_assert(offsetof(struct frame,rip)==136, "IRQ iret RIP offset");
+_Static_assert(offsetof(struct frame,rsp)==160, "IRQ user RSP offset");
 static void print_hex(uint64_t v) {
     const char digits[] = "0123456789abcdef";
     console_write("0x");
     for (int i = 60; i >= 0; i -= 4) console_putc(digits[(v >> i) & 15]);
 }
 static void panic_halt(void) { for (;;) __asm__ volatile("cli; hlt"); }
-void interrupt_dispatch(const struct frame *f) {
+int interrupt_dispatch(const struct frame *f) {
     uint64_t n = f->vector;
     if (n < 32) {
+        if ((f->cs & 3U)==3U) {
+            uint64_t address=0;
+            if(n==14) __asm__ volatile("mov %%cr2,%0":"=r"(address));
+            ring3_on_fault(n,f->error,f->rip,address);
+            return 1; /* abandon faulting user frame, restore kernel launcher */
+        }
         console_write("\nkilons: CPU exception vector="); print_hex(n);
         console_write(" error="); print_hex(f->error);
         console_write(" RIP="); print_hex(f->rip);
         if (n == 14) { uint64_t cr2; __asm__ volatile("mov %%cr2,%0":"=r"(cr2)); console_write(" CR2="); print_hex(cr2); }
         console_write("\n"); panic_halt();
     }
-    if (n == 32) ++ticks;
-    else if (n == 33) keyboard_irq();
+    int switch_user=0;
+    if (n == 32) {
+        ++ticks;
+        /* Time slice: 5 PIT ticks = ~50ms. Never preempt a CPL0 handler. */
+        if ((f->cs&3U)==3U && ticks%5==0)
+            switch_user=ring3_preempt(f->regs,f->rip,f->cs,f->flags,f->rsp,f->ss);
+    } else if (n == 33) keyboard_irq();
     /* IRQ 32..47: slave must be acknowledged before master. */
     if (n >= 40 && n < 48) outb(0xa0, 0x20);
     if (n >= 32 && n < 48) outb(0x20, 0x20);
+    return switch_user;
 }
 uint64_t interrupt_ticks(void) {
     uint64_t v;
@@ -46,6 +68,8 @@ static void set_gate(unsigned n, uint64_t p) {
 void interrupt_init(void) {
     __asm__ volatile("cli");
     for (unsigned i = 0; i < 48; ++i) set_gate(i, (uint64_t)interrupt_stub_table[i]);
+    set_gate(0x80,(uint64_t)ring3_syscall_stub);
+    idt[0x80].flags=0xee; /* DPL3 interrupt gate */
     struct idtr d = {(uint16_t)(sizeof(idt)-1), (uint64_t)idt};
     __asm__ volatile("lidt %0" :: "m"(d) : "memory");
     /* Remap 8259 PIC: master 0x20..0x27, slave 0x28..0x2f. */

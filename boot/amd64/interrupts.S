@@ -254,6 +254,8 @@ interrupt_common:
     cld
     call interrupt_dispatch
     movq %r12, %rsp
+    testl %eax,%eax
+    jnz ring3_switch_to_kernel
     popq %r15
     popq %r14
     popq %r13
