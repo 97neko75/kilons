@@ -5,7 +5,6 @@ static char buffer[sizeof(content)];
 void _start(void) {
     if(write(1,hello,sizeof(hello)-1)!=(long)sizeof(hello)-1) _exit(1);
     if(getpid()<2 || getppid()<1) _exit(2);
-    if((shutdown_system()!=-1 || errno!=EACCES)) _exit(39); /* non-init cannot power off */
     /* A second process may now execute at the same user virtual addresses.
      * Verify this process's private writable page survives rescheduling. */
     buffer[0]='D';

@@ -12,7 +12,7 @@ if not all_elf:
 for filename in all_elf:
     data = Path(filename).read_bytes()
     if len(data) > 32768:
-        raise SystemExit(f'FAIL: {filename}: exceeds RAMFS executable capacity')
+        raise SystemExit(f'FAIL: {filename}: exceeds kernel ELF staging limit')
     if data[:6] != b'\x7fELF\x02\x01':
         raise SystemExit(f'FAIL: {filename}: not ELF64 little-endian')
     kind, machine, version = struct.unpack_from('<HHI', data, 16)

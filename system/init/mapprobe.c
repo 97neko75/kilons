@@ -1,5 +1,6 @@
 #include "../libc/unistd.h"
 void _start(void) {
+    if(mmap(0,4096,PROT_READ|PROT_WRITE,MAP_PRIVATE,-1,0)!=(void *)-1 || errno!=22)_exit(88);
     volatile unsigned char *mem=mmap(0,8192,PROT_READ|PROT_WRITE,MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
     if((long)mem<0)_exit(81);
     mem[0]=0x4b;mem[4096]=0x97;

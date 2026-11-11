@@ -13,7 +13,7 @@ if [ "${status:-0}" -ne 0 ] && [ "${status:-0}" -ne 124 ]; then
     cat "$log";exit 1
 fi
 for marker in 'VFS regression PASS' 'RAMFS regression PASS' \
-    'block RAM device self-test passed' 'VFS /bin ELF64 images installed' \
+    'block RAM device self-test passed' 'started /sbin/init' \
     'independent CR3 mappings selftest PASS' 'Ring 3 interactive shell'; do
     if ! grep -q "$marker" "$log";then cat "$log";exit 1;fi
 done

@@ -56,6 +56,7 @@ void keyboard_irq(void) {
     unsigned next = (head + 1u) % KB_SIZE;
     if (next != tail) { buffer[head] = ch; head = next; }
 }
+int keyboard_available(void){return tail!=head;}
 char keyboard_poll(void) {
     if (tail == head) return 0;
     char ch = buffer[tail];

@@ -24,4 +24,6 @@ unsigned process_zombie_count(void);
 unsigned process_ready_count(void);
 unsigned process_blocked_count(void);
 void process_set_reaper(uint32_t pid);
+/* Check PID uniqueness, reparenting, zombies and record integrity. */
+bool process_validate(void);
 #endif

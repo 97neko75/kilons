@@ -7,27 +7,14 @@
 #include <kilons/console.h>
 #include <kilons/posix.h>
 #include <kilons/process.h>
+#include <kilons/scheduler.h>
 #include <kilons/vfs.h>
-#include <kilons/ramfs.h>
 #include <kilons/ring3.h>
 _Static_assert(offsetof(struct user_context,r15)==0, "ring3 frame r15 offset");
 _Static_assert(offsetof(struct user_context,rax)==112, "ring3 frame rax offset");
 _Static_assert(offsetof(struct user_context,rip)==120, "ring3 frame RIP offset");
 _Static_assert(offsetof(struct user_context,ss)==152, "ring3 frame SS offset");
 _Static_assert(sizeof(struct user_context)==160, "ring3 saved-frame size");
-extern const unsigned char _binary_build_user_demo_elf_start[], _binary_build_user_demo_elf_end[];
-extern const unsigned char _binary_build_user_second_elf_start[], _binary_build_user_second_elf_end[];
-extern const unsigned char _binary_build_user_pks_elf_start[], _binary_build_user_pks_elf_end[];
-extern const unsigned char _binary_build_user_fault_elf_start[], _binary_build_user_fault_elf_end[];
-extern const unsigned char _binary_build_user_probe_elf_start[], _binary_build_user_probe_elf_end[];
-extern const unsigned char _binary_build_user_ud_elf_start[], _binary_build_user_ud_elf_end[];
-extern const unsigned char _binary_build_user_divide_elf_start[], _binary_build_user_divide_elf_end[];
-extern const unsigned char _binary_build_user_hog_elf_start[], _binary_build_user_hog_elf_end[];
-extern const unsigned char _binary_build_user_quick_elf_start[], _binary_build_user_quick_elf_end[];
-extern const unsigned char _binary_build_user_forkprobe_elf_start[], _binary_build_user_forkprobe_elf_end[];
-extern const unsigned char _binary_build_user_execprobe_elf_start[], _binary_build_user_execprobe_elf_end[];
-extern const unsigned char _binary_build_user_mapprobe_elf_start[], _binary_build_user_mapprobe_elf_end[];
-extern const unsigned char _binary_build_user_filter_elf_start[], _binary_build_user_filter_elf_end[];
 #define PAGE 4096ULL
 #define IMAGE_PAGES 16U
 #define STACK_PAGE 24U
@@ -48,13 +35,15 @@ struct user_task {
 };
 static struct user_task tasks[TASK_SLOTS];
 static struct user_task *current_task;
+static void print_hex64(uint64_t n) {
+    static const char digits[]="0123456789abcdef";
+    console_write("0x");
+    for(int shift=60;shift>=0;shift-=4)console_putc(digits[(n>>shift)&15]);
+}
 static void print_uint(uint64_t n) {
     char buffer[21];unsigned i=20;buffer[i]=0;
     do {buffer[--i]=(char)('0'+n%10);n/=10;} while(n);
     console_write(buffer+i);
-}
-static bool same(const char *a,const char *b) {
-    while(*a && *a==*b){a++;b++;}return *a==*b;
 }
 /* All ELF pages are allocated before a process becomes runnable. A separate
  * PML4/CR3 and physical frame set exist for every loaded image. */
@@ -122,53 +111,18 @@ static bool load_stack(struct vm_space *space) {
     }
     return true;
 }
-/* Boot-time images are copied into /bin on the RAMFS. Subsequent spawn
- * and execve paths read actual executable bytes through VFS, without
- * relying on linker addresses inside the ELF loader. This also permits
- * replacing a program file while the system is running. */
-struct builtin_program {const char *name;const unsigned char *start,*end;};
-static const struct builtin_program builtins[]={
-    {"demo",_binary_build_user_demo_elf_start,_binary_build_user_demo_elf_end},
-    {"second",_binary_build_user_second_elf_start,_binary_build_user_second_elf_end},
-    {"pks",_binary_build_user_pks_elf_start,_binary_build_user_pks_elf_end},
-    {"fault",_binary_build_user_fault_elf_start,_binary_build_user_fault_elf_end},
-    {"probe",_binary_build_user_probe_elf_start,_binary_build_user_probe_elf_end},
-    {"ud",_binary_build_user_ud_elf_start,_binary_build_user_ud_elf_end},
-    {"divide",_binary_build_user_divide_elf_start,_binary_build_user_divide_elf_end},
-    {"hog",_binary_build_user_hog_elf_start,_binary_build_user_hog_elf_end},
-    {"quick",_binary_build_user_quick_elf_start,_binary_build_user_quick_elf_end},
-    {"forkprobe",_binary_build_user_forkprobe_elf_start,_binary_build_user_forkprobe_elf_end},
-    {"execprobe",_binary_build_user_execprobe_elf_start,_binary_build_user_execprobe_elf_end},
-    {"mapprobe",_binary_build_user_mapprobe_elf_start,_binary_build_user_mapprobe_elf_end},
-    {"filter",_binary_build_user_filter_elf_start,_binary_build_user_filter_elf_end}
-};
-#define PROGRAM_LIMIT RAMFS_FILE_CAPACITY
+#define PROGRAM_LIMIT (32U*1024U) /* Maximum executable file staged before ELF validation. */
 static uint8_t image_buffer[PROGRAM_LIMIT];
-static bool install_programs(void) {
-    if(vfs_mkdir("/bin")<0)return false;
-    for(unsigned i=0;i<sizeof(builtins)/sizeof(builtins[0]);i++) {
-        char path[64]="/bin/";unsigned j=5;
-        const char *name=builtins[i].name;
-        while(*name && j<sizeof(path)-1)path[j++]=*name++;
-        path[j]=0;
-        size_t n=(size_t)(builtins[i].end-builtins[i].start);
-        if(n>PROGRAM_LIMIT)return false;
-        int fd=vfs_open(path,VFS_READ|VFS_WRITE,1);
-        if(fd<0)return false;
-        int written=vfs_write(fd,builtins[i].start,n);
-        int closed=vfs_close(fd);
-        if(written!=(int)n || closed<0)return false;
-    }
-    return true;
-}
 /* A bounded, kernel-only VFS read; avoids keeping a global file descriptor
  * open and ensures that an ELF cannot exceed its staging buffer. */
 static int load_program(struct vm_space *space,const char *path,uint64_t *entry) {
     struct vfs_info info;
-    if(vfs_stat(path,&info)<0 || info.is_dir)return -2;
+    if(vfs_stat(path,&info)<0)return -vfs_errno();
+    if(info.is_dir)return -13;
+    if(vfs_access(path,1U)<0)return -13; /* executable permission */
     if(!info.size || info.size>PROGRAM_LIMIT)return -8;
     int fd=vfs_open(path,VFS_READ,0);
-    if(fd<0)return -2;
+    if(fd<0)return -vfs_errno();
     size_t done=0;int n=0;
     while(done<info.size) {
         n=vfs_read(fd,image_buffer+done,info.size-done);
@@ -177,45 +131,43 @@ static int load_program(struct vm_space *space,const char *path,uint64_t *entry)
     }
     (void)vfs_close(fd);
     if(done!=info.size)return -8;
-    return load_elf(space,image_buffer,done,entry) && load_stack(space)?0:-8;
-}
-/* Bare names search /bin; absolute paths are accepted. No relative executable
- * paths or symlink traversal yet. */
-static int exec_path(const char *name,char *out,unsigned cap) {
-    if(!name || !*name)return -2;
-    unsigned i=0;
-    if(name[0]!='/') {
-        const char *prefix="/bin/";
-        while(*prefix && i+1<cap)out[i++]=*prefix++;
-    }
-    while(*name && i+1<cap)out[i++]=*name++;
-    if(*name)return -36;
-    out[i]=0;return 0;
+    if(!load_elf(space,image_buffer,done,entry))return -8; /* ENOEXEC */
+    if(!load_stack(space))return -12; /* ENOMEM, caller rolls back */
+    return 0;
 }
 static struct user_task *free_task(void) {
     for(unsigned i=0;i<TASK_SLOTS;i++)if(!tasks[i].used)return &tasks[i];
     return NULL;
 }
-static bool setup_task(struct user_task *t,const char *path) {
+#define EXEC_MAX_STRINGS 8U
+#define EXEC_STRING_LIMIT 64U
+struct exec_args {unsigned argc,envc;char argv[EXEC_MAX_STRINGS][EXEC_STRING_LIMIT];char env[EXEC_MAX_STRINGS][EXEC_STRING_LIMIT];};
+static bool setup_exec_stack(struct vm_space *,struct user_context *,const struct exec_args *);
+static int setup_task(struct user_task *t,const char *path) {
     t->regs=(struct user_context){0};
     t->space=(struct vm_space){0};
-    if(!vm_space_create(&t->space))return false;
+    if(!vm_space_create(&t->space))return -12;
     uint64_t entry=0;
-    if(load_program(&t->space,path,&entry)<0) {
-        vm_space_destroy(&t->space);return false;
+    int result=load_program(&t->space,path,&entry);
+    if(result<0) {
+        vm_space_destroy(&t->space);
+        return result;
     }
     t->regs.rip=entry;t->regs.cs=0x2b;t->regs.flags=0x202;
-    t->regs.ss=0x33;t->regs.rsp=VM_USER_BASE+(STACK_PAGE+4)*PAGE-16;
-    return true;
+    t->regs.ss=0x33;
+    static const struct exec_args initial={.argc=1,.envc=1,.argv={"/sbin/init"},.env={"PATH=/bin"}};
+    if(!setup_exec_stack(&t->space,&t->regs,&initial)){
+        vm_space_destroy(&t->space);return -12;
+    }
+    return 0;
 }
-int ring3_spawn(const char *name,uint32_t parent) {
-    char path[64];int rc=exec_path(name,path,sizeof(path));if(rc)return rc;
-    if(same(path,"/bin/pks") && (parent!=0 || init_pid))return -13;
+static int start_init(void) {
     struct user_task *t=free_task();if(!t)return -11;
     if(next_pid>=0x7fffffffU)return -11;
     uint32_t pid=next_pid++;
-    if(!setup_task(t,path))return -8;
-    if(!process_create_child(pid,parent)) {
+    int rc=setup_task(t,"/sbin/init");
+    if(rc<0)return rc;
+    if(!process_create_child(pid,0)) {
         vm_space_destroy(&t->space);return -11;
     }
     t->pid=pid;t->reason=0;t->exit_status=255;t->started=false;
@@ -246,29 +198,21 @@ int ring3_fork(const struct user_context *parent_context) {
 }
 /* Bounded exec argv/envp copied before replacing the old address space.
  * The new initial stack follows the System V AMD64 argc/argv/envp layout. */
-#define EXEC_MAX_STRINGS 8U
-#define EXEC_STRING_LIMIT 64U
-struct exec_args {unsigned argc,envc;char argv[EXEC_MAX_STRINGS][EXEC_STRING_LIMIT];char env[EXEC_MAX_STRINGS][EXEC_STRING_LIMIT];};
-static bool user_string_copy(uint64_t src,char *dst,unsigned limit) {
-    if(!src)return false;
-    for(unsigned i=0;i<limit;i++) {
-        if(!vm_user_check(src+i,1,false))return false;
-        dst[i]=*(const char *)(uintptr_t)(src+i);
-        if(!dst[i])return true;
-    }
-    return false;
-}
-static bool read_strv(uint64_t address,char arr[][EXEC_STRING_LIMIT],unsigned *count) {
-    *count=0;if(!address)return true;
-    for(unsigned i=0;i<=EXEC_MAX_STRINGS;i++) {
-        uint64_t ptr=0;
-        if(!vm_user_check(address+i*8,8,false))return false;
-        ptr=*(const uint64_t *)(uintptr_t)(address+i*8);
-        if(!ptr)return true;
-        if(i==EXEC_MAX_STRINGS || !user_string_copy(ptr,arr[i],EXEC_STRING_LIMIT))return false;
+static int read_strv(uint64_t address,char arr[][EXEC_STRING_LIMIT],unsigned *count) {
+    *count=0;if(!address)return 0;
+    for(unsigned i=0;i<=EXEC_MAX_STRINGS;i++){
+        uint64_t ptr;
+        if(!vm_space_copyin(&current_task->space,&ptr,address+i*8,sizeof ptr))return -14;
+        if(!ptr)return 0;
+        if(i==EXEC_MAX_STRINGS)return -7;
+        for(unsigned j=0;;j++){
+            if(j==EXEC_STRING_LIMIT)return -7;
+            if(!vm_space_copyin(&current_task->space,&arr[i][j],ptr+j,1))return -14;
+            if(!arr[i][j])break;
+        }
         (*count)++;
     }
-    return false;
+    return -7;
 }
 static bool setup_exec_stack(struct vm_space *space,struct user_context *regs,const struct exec_args *args) {
     uint64_t sp=VM_USER_BASE+(STACK_PAGE+4)*PAGE;
@@ -298,17 +242,23 @@ static bool setup_exec_stack(struct vm_space *space,struct user_context *regs,co
 }
 int ring3_execve(uint64_t path,uint64_t argv,uint64_t envp) {
     if(!current_task)return -22;
-    char name[64],full[64];
-    if(!user_string_copy(path,name,sizeof(name)))return -14;
-    int rc=exec_path(name,full,sizeof(full));if(rc)return rc;
-    if(same(full,"/bin/pks"))return -13;
+    char name[256],full[256];
+    for(unsigned i=0;;i++){
+        if(i==sizeof name)return -36;
+        if(!vm_space_copyin(&current_task->space,&name[i],path+i,1))return -14;
+        if(!name[i])break;
+    }
+    int rc=posix_task_path(name,full,sizeof full);
+    if(rc<0)return rc;
     struct exec_args args={0};
-    if(!read_strv(argv,args.argv,&args.argc) || !read_strv(envp,args.env,&args.envc))return -14;
+    rc=read_strv(argv,args.argv,&args.argc);if(rc<0)return rc;
+    rc=read_strv(envp,args.env,&args.envc);if(rc<0)return rc;
     struct vm_space replacement={0};
     if(!vm_space_create(&replacement))return -12;
     uint64_t entry=0;
-    if(load_program(&replacement,full,&entry)<0) {
-        vm_space_destroy(&replacement);return -8;
+    rc=load_program(&replacement,full,&entry);
+    if(rc<0) {
+        vm_space_destroy(&replacement);return rc;
     }
     struct user_context regs={0};
     regs.rip=entry;regs.cs=0x2b;regs.ss=0x33;regs.flags=0x202;
@@ -318,6 +268,7 @@ int ring3_execve(uint64_t path,uint64_t argv,uint64_t envp) {
     vm_space_activate(NULL);
     vm_space_destroy(&current_task->space);
     current_task->space=replacement;
+    posix_task_exec_close(current_task->pid);
     current_task->regs=regs;
     current_task->reason=1;
     return 0;
@@ -330,15 +281,20 @@ long ring3_mmap(uint64_t addr,uint64_t length,uint64_t prot,uint64_t flags) {
     uint64_t pages=(length+PAGE-1)/PAGE;
     uint64_t where=vm_space_anonymous(&current_task->space,(unsigned)pages);
     if(!where)return -12;
-    if(!(prot&2ULL)) (void)vm_space_protect_anonymous(&current_task->space,where,(unsigned)pages,false);
+    if(!(prot&2ULL) &&
+       !vm_space_protect_anonymous(&current_task->space,where,(unsigned)pages,false)) {
+        (void)vm_space_unmap_anonymous(&current_task->space,where,(unsigned)pages);
+        return -12;
+    }
     return (long)where;
 }
 long ring3_munmap(uint64_t addr,uint64_t length) {
-    if(!current_task || !length || length>8*PAGE)return -22;
+    if(!current_task || !length || length>8*PAGE || (addr&(PAGE-1)))return -22;
     return vm_space_unmap_anonymous(&current_task->space,addr,(unsigned)((length+PAGE-1)/PAGE))?0:-22;
 }
 long ring3_mprotect(uint64_t addr,uint64_t length,uint64_t prot) {
-    if(!current_task || !length || length>8*PAGE || (prot&~3ULL) || !(prot&1ULL))return -22;
+    if(!current_task || !length || length>8*PAGE || (addr&(PAGE-1)) ||
+       (prot&~3ULL) || !(prot&1ULL))return -22;
     return vm_space_protect_anonymous(&current_task->space,addr,(unsigned)((length+PAGE-1)/PAGE),!!(prot&2ULL))?0:-22;
 }
 int ring3_wait_status(uint32_t caller,int child,int *status) {
@@ -351,16 +307,29 @@ int ring3_wait_status(uint32_t caller,int child,int *status) {
     if(!process_collect(caller,(uint32_t)child,status))return -10;
     return child;
 }
-bool ring3_is_init(uint32_t pid) {return pid && pid==init_pid;}
+
 int ring3_trap_syscall(struct user_context *ctx) {
+    static bool boot_syscall_seen;
     if(!current_task)return 1;
+    if(!boot_syscall_seen) {
+        boot_syscall_seen=true;
+        console_write("kilons: P0 BOOT first user syscall nr=");
+        print_uint(ctx->rax);
+        console_write("\n");
+    }
     if(ctx->rax==60) { /* _exit(status) */
         current_task->reason=2;
-        current_task->exit_status=(int)(ctx->rdi&255U);
+        current_task->exit_status=(int)((ctx->rdi&255U)<<8);
         return 1;
     }
-    if(ctx->rax==9) { /* mmap subset: addr, length, prot; flags fixed anon private */
-        ctx->rax=(uint64_t)ring3_mmap(ctx->rdi,ctx->rsi,ctx->rdx,0x22);
+    if(ctx->rax==9) { /* mmap: validate all six ABI arguments */
+        /* The only implemented mode is private anonymous mapping, with
+         * fd=-1 and offset=0. Never silently reinterpret unsupported flags
+         * as an anonymous private mapping. */
+        if(ctx->r8!=UINT64_MAX || ctx->r9!=0)
+            ctx->rax=(uint64_t)(int64_t)-22;
+        else
+            ctx->rax=(uint64_t)ring3_mmap(ctx->rdi,ctx->rsi,ctx->rdx,ctx->r10);
         return 0;
     }
     if(ctx->rax==11) { /* munmap */
@@ -388,6 +357,27 @@ int ring3_trap_syscall(struct user_context *ctx) {
     }
     uint64_t nr=ctx->rax;
     long result=posix_dispatch(nr,ctx->rdi,ctx->rsi,ctx->rdx);
+    if(nr==1 && result==-14 && current_task->pid==init_pid) {
+        static unsigned failed_writes;
+        if(failed_writes++<3) {
+            console_write("kilons: P0 BOOT EFAULT write(fd=");print_uint(ctx->rdi);
+            console_write(", buf=");print_hex64(ctx->rsi);
+            console_write(", len=");print_uint(ctx->rdx);
+            console_write(", reason=");
+            uint64_t count=ctx->rdx;
+            if(count>4096U-(ctx->rsi&4095U))count=4096U-(ctx->rsi&4095U);
+            print_uint((unsigned)vm_user_check_reason(ctx->rsi,count,false));
+            console_write(")\n");
+        }
+    }
+    if(nr<=1 && result==-11 && posix_io_should_wait(current_task->pid,ctx->rdi,nr==1,ctx->rdx)){
+        /* No bytes transferred. Resume at the int $0x80 instruction with
+         * its original arguments once a peer makes progress or closes. */
+        current_task->regs=*ctx;
+        current_task->regs.rip-=2;
+        current_task->reason=4;
+        return 1;
+    }
     if(nr==61 && result==-11 && ctx->rdx==0) {
         /* The child exists but has not exited. Suspend this parent instead
          * of making userspace poll in a sched_yield() loop. */
@@ -424,14 +414,46 @@ void ring3_on_fault(uint64_t vector,uint64_t error,uint64_t rip,uint64_t address
     (void)error;(void)rip;(void)address;
     if(!current_task) { console_write("kilons: invalid user fault context\n");for(;;)__asm__ volatile("cli;hlt"); }
     current_task->reason=2;
-    current_task->exit_status=128+(int)vector;
+    current_task->exit_status=vector==0?8:vector==6?4:11; /* SIGFPE, SIGILL, SIGSEGV */
     console_write("kilons: isolated user exception PID=");print_uint(current_task->pid);
     console_write(" vector=");print_uint(vector);console_write("; kernel continues\n");
 }
 static void run_task(struct user_task *t) {
-    if(!process_start(t->pid))return;
-    if(!t->started) {posix_task_begin(t->pid);t->started=true;}
+    static bool first_init_dispatch=true;
+    bool trace_init = t->pid==init_pid && first_init_dispatch;
+    if(trace_init)first_init_dispatch=false;
+    if(!process_start(t->pid)) {
+        if(t->pid==init_pid)console_write("kilons: P0 BOOT ERROR init not READY\n");
+        return;
+    }
+    if(trace_init)console_write("kilons: P0 BOOT init process selected\n");
+    bool first_run = !t->started;
+    if(!t->started) {
+        if(!posix_task_begin(t->pid)) {
+            /* A missing task_io slot is fatal to this process, not to the
+             * kernel. Report status through the normal wait/reap channel. */
+            console_write("kilons: process IO allocation failed PID=");
+            print_uint(t->pid);console_write("\n");
+            (void)process_exit(t->pid,255<<8);
+            vm_space_destroy(&t->space);
+            t->used=false;
+            return;
+        }
+        t->started=true;
+    }
     posix_task_activate(t->pid);
+    /* Check the private address space on first dispatch. Rechecking all
+     * 512 entries on every keyboard-poll yield would harm responsiveness. */
+    if(first_run && !vm_space_validate(&t->space)) {
+        console_write("kilons: P0 BOOT ERROR user page-table audit FAIL\n");
+        posix_task_end();
+        (void)process_exit(t->pid,255<<8);
+        vm_space_destroy(&t->space);
+        t->used=false;
+        posix_task_activate(0);
+        return;
+    }
+    if(trace_init)console_write("kilons: P0 BOOT init IO and VM verified\n");
     vm_space_activate(&t->space);
     if(t->wait_write_pending) {
         if(t->wait_user_status &&
@@ -442,15 +464,16 @@ static void run_task(struct user_task *t) {
     tss_set_rsp0((uint64_t)(uintptr_t)(t->supervisor_stack+sizeof(t->supervisor_stack)));
     current_task=t;
     t->reason=0;
+    if(trace_init)console_write("kilons: P0 BOOT entering user iret\n");
     ring3_resume(&t->regs);
     current_task=NULL;
     vm_space_activate(NULL);
     if(t->reason==1) {
         (void)process_suspend(t->pid);
-    } else if(t->reason==3) {
+    } else if(t->reason==3 || t->reason==4) {
         (void)process_block(t->pid);
     } else {
-        if(t->reason!=2)t->exit_status=255;
+        if(t->reason!=2)t->exit_status=255<<8;
         posix_task_end();
         (void)process_exit(t->pid,t->exit_status);
         vm_space_destroy(&t->space);
@@ -458,6 +481,9 @@ static void run_task(struct user_task *t) {
         console_write(" exited status=");print_uint((unsigned)t->exit_status);console_write("\n");
         t->used=false;
     }
+    /* Exit must release task descriptors BEFORE clearing the active task.
+     * A yielding/blocked task keeps its own IO table for its next run. */
+    posix_task_activate(0);
 }
 /* Complete a sleeping wait only after the child's resources were released.
  * User memory is written later under the parent's own CR3. */
@@ -465,6 +491,11 @@ static void wake_waiters(void) {
     for(unsigned i=0;i<TASK_SLOTS;i++) {
         struct user_task *t=&tasks[i];
         if(!t->used || process_state_of(t->pid)!=PROCESS_BLOCKED)continue;
+        if(t->reason==4){
+            if(!posix_io_should_wait(t->pid,t->regs.rdi,t->regs.rax==1,t->regs.rdx))
+                (void)process_wake(t->pid);
+            continue;
+        }
         int status=0;
         int result=ring3_wait_status(t->pid,t->wait_child,&status);
         if(result==-11)continue;
@@ -477,15 +508,14 @@ static void wake_waiters(void) {
 }
 void ring3_boot(void) {
     if(!vm_user_init()) {console_write("kilons: user VM unavailable\n");goto fail;}
-    if(!install_programs()) {console_write("kilons: /bin ELF installation FAIL\n");goto fail;}
-    console_write("kilons: VFS /bin ELF64 images installed\n");
+
     if(!vm_space_selftest()) {console_write("kilons: independent CR3 selftest FAIL\n");goto fail;}
     console_write("kilons: independent CR3 mappings selftest PASS\n");
-    int shell=ring3_spawn("pks",0);
-    if(shell<1) {console_write("kilons: PKS load failed\n");goto fail;}
-    init_pid=(uint32_t)shell;
+    int init=start_init();
+    if(init<1) {console_write("kilons: cannot start /sbin/init\n");goto fail;}
+    init_pid=(uint32_t)init;
     process_set_reaper(init_pid);
-    console_write("kilons: Ring 3 PKS is the normal interactive shell\n");
+    console_write("kilons: started /sbin/init\n");
     unsigned cursor=0;
     for(;;) {
         bool ran=false;
@@ -494,16 +524,15 @@ void ring3_boot(void) {
             struct user_task *t=&tasks[id];
             if(t->used && process_state_of(t->pid)==PROCESS_READY) {
                 run_task(t);wake_waiters();cursor=(id+1)%TASK_SLOTS;ran=true;
-                /* Idle after the shell's cooperative input poll. Keep PIT
-                 * enabled so keyboard IRQ delivery can wake the CPU. */
-                if(t->pid==init_pid && t->reason==1 && process_live_count()==1)
-                    __asm__ volatile("sti;hlt" ::: "memory");
                 break;
             }
         }
         if(!ran) {
             if(!process_live_count())break;
+            /* Guest boot fix: do not switch kernel worker contexts while
+             * the Ring 3 dispatcher owns the launcher's saved stack. */
             __asm__ volatile("sti;hlt");
+            wake_waiters();
         }
     }
     console_write("kilons: init exited; no privileged shell fallback\n");
