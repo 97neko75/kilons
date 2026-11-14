@@ -52,7 +52,7 @@ sudo apt update
 sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
 ```
 
-(因为开发者用的就是这个，我也不想测试其他的了，有问题的话，不妨试试我这个版本吧)
+(其他版本、发行版待测试)
 
 然后克隆仓库：
 
