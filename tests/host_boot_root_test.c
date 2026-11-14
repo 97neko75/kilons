@@ -11,7 +11,7 @@ static bool sector(void *context,uint64_t lba,uint8_t dst[512]){
     return !fseek(image,(long)(lba*512),SEEK_SET) && fread(dst,1,512,image)==512;
 }
 int main(int argc,char **argv){
-    assert(argc==2 || argc==3);
+    assert(argc>=2);
     FILE *image=fopen(argv[1],"rb");assert(image);
     assert(!fseek(image,0,SEEK_END));
     long size=ftell(image);assert(size>0 && size%512==0);
@@ -23,9 +23,9 @@ int main(int argc,char **argv){
     vfs_set_credentials(1000,1000);
     int init=vfs_open("/sbin/init",VFS_READ,0);
     char magic[4];assert(init>=3 && vfs_read(init,magic,4)==4 && !memcmp(magic,"\177ELF",4));
-    if(argc==3){
-        int extra=vfs_open(argv[2],VFS_READ,0);
-        assert(extra>=3 && vfs_access(argv[2],1)==0);
+    for(int i=2;i<argc;i++){
+        int extra=vfs_open(argv[i],VFS_READ,0);
+        assert(extra>=3 && vfs_access(argv[i],1)==0);
         assert(vfs_read(extra,magic,4)==4 && !memcmp(magic,"\177ELF",4));
         assert(vfs_close(extra)==0);
     }

@@ -9,7 +9,7 @@ static struct kilofs fs;
 int main(int argc,char **argv){
     if(argc!=3){fprintf(stderr,"usage: %s NEW_IMAGE BLOCKS\nrefuses existing paths and device nodes\n",argv[0]);return 2;}
     char *end=0;unsigned long blocks=strtoul(argv[2],&end,10);
-    if(!*argv[2]||*end||blocks<8||blocks>KFS_MAX_BLOCKS){fprintf(stderr,"invalid block count (8..%u)\n",KFS_MAX_BLOCKS);return 2;}
+    if(!*argv[2]||*end||blocks<KFS_DATA_START+1||blocks>KFS_MAX_BLOCKS){fprintf(stderr,"invalid block count (%u..%u)\n",KFS_DATA_START+1,KFS_MAX_BLOCKS);return 2;}
     /* O_EXCL is intentional: never overwrite an existing disk or image. */
     int fd=open(argv[1],O_WRONLY|O_CREAT|O_EXCL,0600);
     if(fd<0){perror("create image");return 2;}
@@ -26,6 +26,6 @@ int main(int argc,char **argv){
     if(rc<0){fprintf(stderr,"kilofs format failed: %d\n",rc);close(fd);return 1;}
     unsigned errors=0;rc=kfs_fsck(&fs,&errors);
     if(rc<0||errors){fprintf(stderr,"format verification failed: rc=%d errors=%u\n",rc,errors);close(fd);return 1;}
-    printf("created %s: %lu blocks, %lu bytes, kilofs format v1\n",argv[1],blocks,blocks*(unsigned long)KFS_BLOCK);
+    printf("created %s: %lu blocks, %lu bytes, kilofs format v%u with redo journal\n",argv[1],blocks,blocks*(unsigned long)KFS_BLOCK,KFS_FORMAT_VERSION);
     close(fd);return 0;
 }

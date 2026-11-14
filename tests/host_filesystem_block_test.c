@@ -1,6 +1,7 @@
 #include <kilons/block.h>
 #include <kilons/vfs.h>
 #include <kilons/ramfs.h>
+#include <kilons/kerrno.h>
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
@@ -15,8 +16,10 @@ int main(void) {
     assert(ro_id==1 && block_read(ro_id,0,sector));
     assert(!block_write(ro_id,0,sector) && !block_read(ro_id,4,sector));
     ramfs_init();vfs_init();
+    assert(ramfs_symlink(NULL,"invalid")==-K_EFAULT);
     assert(vfs_selftest());
     assert(vfs_mkdir("/bin")==0);
+    assert(vfs_symlink(NULL,"/bin/invalid")==-1 && vfs_errno()==K_EFAULT);
     int fd=vfs_open("/bin/testing",VFS_READ|VFS_WRITE,1);
     assert(fd>=3);
     assert(vfs_write(fd,"abcdef",6)==6);

@@ -15,6 +15,7 @@ static size_t length(const char *s) {
 static int send_bytes(int fd,const char *data,size_t size) {
     while(size) {
         long n=write(fd,data,size);
+        if(n<0 && errno==EINTR)continue;
         if(n<0 && errno==EAGAIN){sched_yield();continue;}
         if(n<=0)return -1;
         data+=n;
@@ -78,20 +79,27 @@ static enum token token(const char **input,char **storage) {
     *input=p;
     return quote?INVALID:WORD;
 }
-#define EXEC_ARGS 8u
 #define STAGES 8u
-enum builtin_id { EXTERNAL, CHANGE_DIR, EXPORT_ENV, EXIT_SHELL };
+enum builtin_id { EXTERNAL, CHANGE_DIR, EXPORT_ENV, EXIT_SHELL, SHUTDOWN, REAP };
 struct program {
     enum builtin_id builtin;
-    char *argv[EXEC_ARGS+1];
+    char **argv;
     unsigned argc;
     char *input,*output;
     int flags;
 };
-struct job {struct program stage[STAGES];unsigned count;};
+struct job {
+    struct program stage[STAGES];
+    /* A line can contain at most one single-byte word per two bytes,
+     * plus one vector terminator per pipeline stage. */
+    char *arguments[LINE_CAP/2+STAGES];
+    unsigned count;
+};
 
 static int parse(const char *input,char *storage,struct job *job){
     struct program *prog=&job->stage[0];
+    unsigned next=0;
+    prog->argv=job->arguments;
     for(;;){
         char *word=storage;
         enum token t=token(&input,&storage);
@@ -101,16 +109,20 @@ static int parse(const char *input,char *storage,struct job *job){
         }
         if(t==INVALID)return 0;
         if(t==WORD){
-            if(prog->argc==EXEC_ARGS || length(word)>=64)return 0;
+            if(next+1>=sizeof job->arguments/sizeof job->arguments[0])return 0;
             if(!prog->argc){
                 if(equal(word,"cd"))prog->builtin=CHANGE_DIR;
                 else if(equal(word,"export"))prog->builtin=EXPORT_ENV;
+                else if(equal(word,"shutdown"))prog->builtin=SHUTDOWN;
+                else if(equal(word,"reap"))prog->builtin=REAP;
                 else if(equal(word,"exit"))prog->builtin=EXIT_SHELL;
             }
-            prog->argv[prog->argc++]=word;
+            job->arguments[next++]=word;
+            prog->argc++;
         }else if(t==PIPE){
             if(!prog->argc || job->count+1==STAGES)return 0;
             prog=&job->stage[++job->count];
+            prog->argv=&job->arguments[++next];
         }else{
             if(token(&input,&storage)!=WORD || !*word)return 0;
             if(t==INPUT){
@@ -138,7 +150,21 @@ static int redirect(const struct program *p){
     return 0;
 }
 static int last_status;
+static int boot_console;
 static int builtin(const struct program *p){
+    if(p->builtin==SHUTDOWN){
+        if(p->argc!=1)return 2;
+        if(!boot_console){err("shutdown: use the boot console directly\n");return 1;}
+        if(send_bytes(3,"S",1)<0){failure("shutdown","init");return 1;}
+        _exit(0);
+    }
+    if(p->builtin==REAP){
+        int status, pid;
+        while((pid=waitpid(-1,&status,WNOHANG))>0){
+            out("reaped PID=");number((unsigned)pid);out("\n");
+        }
+        return pid<0 && errno!=ECHILD;
+    }
     if(p->builtin==EXIT_SHELL){
         if(p->argc==1)_exit(last_status);
         if(p->argc!=2 || !p->argv[1][0])return 2;
@@ -187,6 +213,7 @@ static int execute(struct job *job){
         if(i+1<job->count && pipe(ends)<0){failure("pipe","pipeline");break;}
         int pid=fork();
         if(pid==0){
+            if(boot_console){close(3);boot_console=0;}
             if(ends[0]>=0)close(ends[0]);
             if(previous>=0 && attach(previous,0)<0)_exit(126);
             if(ends[1]>=0 && attach(ends[1],1)<0)_exit(126);
@@ -208,7 +235,9 @@ static int execute(struct job *job){
     if(previous>=0)close(previous);
     for(unsigned i=0;i<launched;i++){
         int raw;
-        if(waitpid(pids[i],&raw,0)<0){failure("waitpid","pipeline");continue;}
+        pid_t waited;
+        do { waited=waitpid(pids[i],&raw,0); } while(waited<0 && errno==EINTR);
+        if(waited<0){failure("waitpid","pipeline");continue;}
         if(i+1==job->count)
             status=WIFEXITED(raw)?WEXITSTATUS(raw):128+WTERMSIG(raw);
     }
@@ -218,7 +247,7 @@ static int command(const char *input){
     if(length(input)>=LINE_CAP){err("pks: line too long\n");return 2;}
     char words[2*LINE_CAP];
     struct job job={0};
-    if(!parse(input,words,&job)){err("pks: invalid arguments or syntax\n");return 2;}
+    if(!parse(input,words,&job)){err("pks: invalid arguments or syntax\n");last_status=2;return last_status;}
     if(job.count)last_status=execute(&job);
     return last_status;
 }
@@ -277,6 +306,7 @@ static int script(const char *path){
     unsigned n=0;int status=0;
     for(;;){
         long rc=read(fd,&ch,1);
+        if(rc<0 && errno==EINTR)continue;
         if(rc<0 && errno==EAGAIN){sched_yield();continue;}
         if(rc<0){failure("read",path?path:"stdin");status=1;break;}
         if(!rc || ch=='\n'){
@@ -290,7 +320,10 @@ static int script(const char *path){
 }
 int main(int argc,char **argv) {
     if(argc>=3 && equal(argv[1],"-c"))return command(argv[2]);
-    if(argc>1)return script(argv[1]);
+    if(argc==2 && equal(argv[1],"--boot-console") && getppid()==1){
+        if(fcntl(3,F_SETFD,FD_CLOEXEC)<0 || send_bytes(3,"R",1)<0)return 1;
+        boot_console=1;
+    }else if(argc>1)return script(argv[1]);
     if(!isatty(0))return script(0);
     out("\nkilons PKS: Ring 3 interactive shell\n");
     out("Type a command name or pathname.\n");
@@ -301,6 +334,7 @@ int main(int argc,char **argv) {
     for(;;) {
         unsigned char byte=0;
         long n=read(0,&byte,1);
+        if(n<0 && errno==EINTR)continue;
         if(n<0 && errno==EAGAIN){sched_yield();continue;}
         if(n<=0){if(n<0)failure("read","stdin");_exit(n<0?1:0);}
         int ch=key_event(byte);

@@ -40,7 +40,7 @@ static int install(const char *spec){
 int main(int argc,char **argv){
     if(argc<4){fprintf(stderr,"usage: %s NEW_IMAGE BLOCKS /bin/name=build/user_name.elf ...\n",argv[0]);return 2;}
     char *end=0;unsigned long blocks=strtoul(argv[2],&end,10);
-    if(!*argv[2]||*end||blocks<8||blocks>KFS_MAX_BLOCKS)return 2;
+    if(!*argv[2]||*end||blocks<KFS_DATA_START+1||blocks>KFS_MAX_BLOCKS)return 2;
     int fd=open(argv[1],O_CREAT|O_EXCL|O_RDWR|O_NOFOLLOW,0600);
     if(fd<0){perror("create new image");return 2;}
     struct stat st;

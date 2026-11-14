@@ -2,39 +2,75 @@
 /* Directory records are fixed 128-byte slots: ino(u32), kind(u8),
  * name_len(u8), name[122]. Deleted slots have ino=0. */
 static int read_slot(struct kilofs *fs,struct kfs_node *dir,uint32_t slot,struct kfs_dirent *out){
+    if(!fs||!dir||!out)return -K_EFAULT;
     if(dir->kind!=KFS_KIND_DIR)return -K_ENOTDIR;
     if((uint64_t)(slot+1)*KFS_DIRENT_BYTES>dir->size)return 0;
-    uint32_t index=slot/32,offset=(slot%32)*KFS_DIRENT_BYTES;
-    if(index>=KFS_MAX_FILE_BLOCKS||!dir->direct[index])return -K_EIO;
-    int rc=kfs_cache_read(fs,dir->direct[index],fs->scratch);if(rc<0)return rc;
+    uint32_t index=slot/32,offset=(slot%32)*KFS_DIRENT_BYTES,block;
+    int rc=kfs_data_block_get(fs,dir,index,0,&block);if(rc<0)return rc;
+    if(!block)return -K_EIO;
+    rc=kfs_cache_read(fs,block,fs->scratch);if(rc<0)return rc;
     const uint8_t *p=fs->scratch+offset;
     out->ino=kfs_u32(p);out->kind=p[4];
     unsigned len=p[5];if(len>KFS_NAME_MAX)return -K_EIO;
+    if(out->ino>=KFS_INODES)return -K_EIO;
+    if(!out->ino) {
+        if(out->kind||len)return -K_EIO;
+    } else if((out->kind!=KFS_KIND_FILE&&out->kind!=KFS_KIND_DIR&&
+               out->kind!=KFS_KIND_SYMLINK) ||
+              !kfs_name_bytes_valid(p+6,len))return -K_EIO;
     for(unsigned j=0;j<len;j++)out->name[j]=(char)p[6+j];
     out->name[len]=0;
     return 1;
 }
 static int write_slot(struct kilofs *fs,uint32_t dir_ino,struct kfs_node *dir,
                       uint32_t slot,const struct kfs_dirent *entry){
+    if(!fs||!dir||!entry)return -K_EFAULT;
     if(fs->readonly)return -K_EROFS;
-    if(slot>=KFS_MAX_FILE_BLOCKS*32)return -K_ENOSPC;
+    if(slot>=kfs_file_block_limit(fs)*32U)return -K_ENOSPC;
+    unsigned len=0;while(len<=KFS_NAME_MAX&&entry->name[len])len++;
+    if(len>KFS_NAME_MAX)return -K_ENAMETOOLONG;
+    if(entry->ino) {
+        if(!kfs_name_bytes_valid((const uint8_t *)entry->name,len))return -K_EINVAL;
+    } else if(len || entry->kind)return -K_EINVAL;
     uint32_t index=slot/32,offset=(slot%32)*KFS_DIRENT_BYTES;
-    if(!dir->direct[index]){
-        int rc=kfs_block_allocate(fs,&dir->direct[index]);if(rc<0)return rc;
+    uint32_t old_block;int rc=kfs_data_block_get(fs,dir,index,0,&old_block);
+    if(rc<0)return rc;
+    uint64_t old_size=dir->size;
+    struct file_times old_times=dir->times;
+    struct kfs_node old_node=*dir;
+    uint8_t old_entry[KFS_DIRENT_BYTES];
+    if(old_block){
+        rc=kfs_cache_read(fs,old_block,fs->scratch);if(rc<0)return rc;
+        kfs_copy(old_entry,fs->scratch+offset,KFS_DIRENT_BYTES);
     }
-    int rc=kfs_cache_read(fs,dir->direct[index],fs->scratch);if(rc<0)return rc;
+    uint32_t block;rc=kfs_data_block_get(fs,dir,index,1,&block);
+    if(rc<0)return rc;
+    int allocated=!old_block;
+    if(!old_block)kfs_zero(fs->scratch,KFS_BLOCK);
+    else {rc=kfs_cache_read(fs,block,fs->scratch);if(rc<0)return rc;}
     uint8_t *p=fs->scratch+offset;kfs_zero(p,KFS_DIRENT_BYTES);
     kfs_p32(p,entry->ino);p[4]=entry->kind;
-    unsigned len=0;while(entry->name[len]&&len<=KFS_NAME_MAX)len++;
-    if(len>KFS_NAME_MAX)return -K_ENAMETOOLONG;
     p[5]=(uint8_t)len;kfs_copy(p+6,entry->name,len);
-    rc=kfs_cache_write(fs,dir->direct[index],fs->scratch);if(rc<0)return rc;
+    rc=kfs_cache_write(fs,block,fs->scratch);
+    if(rc<0){if(allocated)(void)kfs_data_block_release(fs,dir,index);return rc;}
     uint64_t end=(uint64_t)(slot+1)*KFS_DIRENT_BYTES;
     if(dir->size<end)dir->size=end;
-    return kfs_inode_save(fs,dir_ino,dir);
+    dir->times.modify=dir->times.change=file_now();
+    rc=kfs_inode_save(fs,dir_ino,dir);
+    if(rc<0) {
+        if(allocated) {
+            (void)kfs_data_block_release(fs,dir,index);
+        } else if(kfs_cache_read(fs,old_block,fs->scratch)==0) {
+            kfs_copy(fs->scratch+offset,old_entry,KFS_DIRENT_BYTES);
+            (void)kfs_cache_write(fs,old_block,fs->scratch);
+        }
+        *dir=old_node;dir->size=old_size;dir->times=old_times;
+    }
+    return rc;
 }
 int kfs_dir_find(struct kilofs *fs,uint32_t parent,const char *name,
                  uint32_t *ino,uint8_t *kind){
+    if(!fs||!name)return -K_EINVAL;
     struct kfs_node dir;int rc=kfs_inode_load(fs,parent,&dir);if(rc<0)return rc;
     if(dir.kind!=KFS_KIND_DIR)return -K_ENOTDIR;
     unsigned slots=(unsigned)(dir.size/KFS_DIRENT_BYTES);
@@ -50,10 +86,15 @@ int kfs_dir_find(struct kilofs *fs,uint32_t parent,const char *name,
 }
 int kfs_dir_add(struct kilofs *fs,uint32_t parent,const char *name,uint32_t ino,uint8_t kind){
     if(!fs||!name||!ino||ino>=KFS_INODES)return -K_EINVAL;
-    unsigned len=0;while(name[len]&&len<=KFS_NAME_MAX)len++;
+    if(kind!=KFS_KIND_FILE&&kind!=KFS_KIND_DIR&&kind!=KFS_KIND_SYMLINK)return -K_EINVAL;
+    unsigned len=0;while(len<=KFS_NAME_MAX&&name[len])len++;
     if(!len||len>KFS_NAME_MAX)return -K_ENAMETOOLONG;
-    if(kfs_equal(name,".")||kfs_equal(name,".."))return -K_EINVAL;
-    int rc=kfs_dir_find(fs,parent,name,0,0);if(rc==0)return -K_EEXIST;
+    if(!kfs_name_bytes_valid((const uint8_t *)name,len))return -K_EINVAL;
+    struct kfs_node target_node;
+    int rc=kfs_inode_load(fs,ino,&target_node);
+    if(rc<0)return rc;
+    if(target_node.kind!=kind)return -K_EINVAL;
+    rc=kfs_dir_find(fs,parent,name,0,0);if(rc==0)return -K_EEXIST;
     if(rc!=-K_ENOENT)return rc;
     struct kfs_node dir;rc=kfs_inode_load(fs,parent,&dir);if(rc<0)return rc;
     unsigned slots=(unsigned)(dir.size/KFS_DIRENT_BYTES),target=slots;

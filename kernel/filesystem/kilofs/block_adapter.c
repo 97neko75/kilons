@@ -17,7 +17,7 @@ static int kfs_bflush(void *p){
 }
 int kfs_bind_block(struct kfs_device *out,struct kfs_block_context *ctx,int id,int rw){
     uint64_t sectors;bool writable;
-    if(!out||!ctx||!block_info(id,&sectors,&writable)||sectors/8>KFS_MAX_BLOCKS||
+    if(!out||!ctx||!block_info(id,&sectors,&writable)||sectors%8||sectors/8>KFS_MAX_BLOCKS||
        sectors/8<8)return -K_EINVAL;
     if(rw&&!writable)return -K_EROFS;
     ctx->block_id=id;

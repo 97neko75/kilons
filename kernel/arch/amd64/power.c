@@ -75,6 +75,15 @@ static const uint8_t *find_fadt(void) {
     return f;
 }
 /* Minimal, bounded AML _S5 package decoder. Not a general AML interpreter. */
+/* ACPI 2.0+ FADT, IA-PC Boot Architecture Flags, bit 1.
+ * Older tables carry no keyboard-controller presence information. */
+int amd64_i8042_presence(void) {
+    const uint8_t *fadt = find_fadt();
+    if (!fadt || fadt[8] < 3 || rd32(fadt + 4) < 111)
+        return -1;
+    return (rd16(fadt + 109) & 2u) != 0;
+}
+
 static int aml_integer(const uint8_t **cur,const uint8_t *end,uint32_t *v) {
     const uint8_t *p=*cur;
     if(p>=end) return 0;

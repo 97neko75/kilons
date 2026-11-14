@@ -6,10 +6,12 @@ static int copy(int fd){
     char data[512];
     for(;;){
         long n=read(fd,data,sizeof data);
+        if(n<0 && errno==EINTR)continue;
         if(n<0 && errno==EAGAIN){sched_yield();continue;}
         if(n<=0)return n<0;
         for(long i=0;i<n;){
             long k=write(1,data+i,(size_t)(n-i));
+            if(k<0 && errno==EINTR)continue;
             if(k<0 && errno==EAGAIN){sched_yield();continue;}
             if(k<=0)return 1;
             i+=k;

@@ -35,6 +35,7 @@ void vm_space_activate(struct vm_space *space);
 uint64_t vm_space_cr3(const struct vm_space *space);
 bool vm_space_map(struct vm_space *space,unsigned index,uint64_t phys,bool writable,bool executable);
 bool vm_space_check(const struct vm_space *space,uint64_t address,uint64_t length,bool writable);
+bool vm_space_check_execute(const struct vm_space *space,uint64_t address,uint64_t length);
 bool vm_user_check(uint64_t addr,uint64_t len,bool writable);
 /* Debug-only classification of a rejected user memory range; never bypass checks.
  * 0=valid, 1=address/length, 2=page-table chain, 3=absent leaf,

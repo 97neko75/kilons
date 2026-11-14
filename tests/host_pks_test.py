@@ -8,19 +8,29 @@ import tempfile
 import tty
 
 shell = Path(sys.argv[1]).resolve()
-with tempfile.TemporaryDirectory() as directory:
+with tempfile.TemporaryDirectory(dir=shell.parent) as directory:
     root = Path(directory)
     def run(line, status=0):
         p = subprocess.run([shell, "-c", line], cwd=root, capture_output=True, timeout=5)
         assert p.returncode == status, (line,p.returncode,p.stderr)
         return p
-    (root/"unregistered").symlink_to("/bin/echo")
+    helper = root / "unregistered"
+    helper.write_text("#!/bin/sh\nexec /bin/echo \"$@\"\n")
+    helper.chmod(0o755)
     # A fresh name, installed after the shell was built, is found by PATH.
     script = 'export PATH=.:/bin\nunregistered "A B" "" | cat | cat > "out file"\necho C >> "out file"\n'
     p=subprocess.run([shell],input=script.encode(),cwd=root,capture_output=True,timeout=5)
-    assert p.returncode==0 and not p.stdout and (root/"out file").read_bytes()==b"A B \nC\n"
+    output = root / "out file"
+    actual = output.read_bytes() if output.exists() else None
+    assert (p.returncode, p.stdout, actual) == (0, b"", b"A B \nC\n"), (
+        p.returncode, p.stdout, p.stderr, actual
+    )
     assert run('cat < "out file"').stdout==b"A B \nC\n"
     assert run("./unregistered ok").stdout==b"ok\n"
+    words = ["a"*80] + [str(i) for i in range(12)]
+    assert run("echo " + " ".join(words) + " | cat").stdout == (" ".join(words)+"\n").encode()
+    invalid=subprocess.run([shell],input=b"echo |\nexit\n",capture_output=True,timeout=5)
+    assert invalid.returncode==2
     run("not-a-pks-command",127)
     run("/bin/false | /bin/true")
     run("/bin/true | /bin/false",1)

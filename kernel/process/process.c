@@ -7,9 +7,11 @@
  * NOT an SMP lock and does not turn the task scheduler into a SMP scheduler. */
 #define PROCESS_SLOTS 16U
 struct process_record {
-    uint32_t pid,parent;
+    uint32_t uid,saved_uid;
+    uint32_t pid,parent,pgid,sid;
+    bool execed,stopped,stop_event,continue_event;
     enum process_state state;
-    int status;
+    int status,stop_signal;
 };
 static struct process_record records[PROCESS_SLOTS];
 static uint32_t reaper;
@@ -59,12 +61,12 @@ bool process_create_child(uint32_t pid,uint32_t parent) {
     uint64_t flags=kilons_irq_save();
     bool ok=false;
     if(!pid || find_locked(pid))goto out;
-    if(parent) {
-        struct process_record *p=find_locked(parent);
-        if(!p || p->state==PROCESS_ZOMBIE)goto out;
-    }
+    struct process_record *ancestor=find_locked(parent);
+    if(parent && (!ancestor || ancestor->state==PROCESS_ZOMBIE))goto out;
     for(unsigned i=0;i<PROCESS_SLOTS;i++)if(records[i].state==PROCESS_FREE) {
-        records[i]=(struct process_record){pid,parent,PROCESS_READY,0};
+        records[i]=(struct process_record){.pid=pid,.parent=parent,.state=PROCESS_READY,
+            .uid=ancestor?ancestor->uid:1000,.saved_uid=ancestor?ancestor->saved_uid:1000,
+            .pgid=ancestor?ancestor->pgid:pid,.sid=ancestor?ancestor->sid:pid};
         ok=true;break;
     }
 out:
@@ -119,23 +121,159 @@ bool process_collect(uint32_t parent,uint32_t pid,int *status) {
     kilons_irq_restore(flags);
     return ok;
 }
-int process_collect_any(uint32_t parent,int *status) {
+int process_wait_events(uint32_t parent,int selector,uint32_t group,int *status,bool peek,uint32_t *uid,unsigned events) {
     if(!status || !parent)return -10;
     uint64_t flags=kilons_irq_save();
     int result=-10;
+    struct process_record *caller=find_locked(parent);
+    if(!caller){kilons_irq_restore(flags);return result;}
+    if(selector==0 && group==0)group=caller->pgid;
+    if(selector< -1)group=(uint32_t)(-(int64_t)selector);
     for(unsigned i=0;i<PROCESS_SLOTS;i++) {
         struct process_record *p=&records[i];
         if(p->state==PROCESS_FREE || p->parent!=parent)continue;
+        if(selector>0 && p->pid!=(unsigned)selector)continue;
+        if((selector==0 || selector< -1) && p->pgid!=group)continue;
         if(result==-10)result=0;  /* has child, but may still be running */
-        if(p->state==PROCESS_ZOMBIE) {
+        if(p->state!=PROCESS_ZOMBIE && ((p->stop_event && (events&2)) || (p->continue_event && (events&4)))) {
+            result=(int)p->pid;
+            if(uid)*uid=p->uid;
+            if(p->stop_event && (events&2)) {
+                *status=(p->stop_signal<<8)|127;
+                if(!peek)p->stop_event=false;
+            } else {
+                *status=0xffff;
+                if(!peek)p->continue_event=false;
+            }
+            break;
+        }
+        if(p->state==PROCESS_ZOMBIE && (events&1)) {
             result=(int)p->pid;
             *status=p->status;
-            clear_record(p);
+            if(uid)*uid=p->uid;
+            if(!peek)clear_record(p);
             break;
         }
     }
     kilons_irq_restore(flags);
     return result;
+}
+int process_wait_event(uint32_t parent,int selector,uint32_t group,int *status,bool peek,uint32_t *uid) {
+    return process_wait_events(parent,selector,group,status,peek,uid,1);
+}
+bool process_is_stopped(uint32_t pid) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid);
+    bool stopped=p && p->stopped;
+    kilons_irq_restore(flags);
+    return stopped;
+}
+void process_stop(uint32_t pid,int sig) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid);
+    if(p && !p->stopped) {
+        p->stopped=true;
+        p->stop_signal=sig;
+        p->stop_event=true;
+        p->continue_event=false;
+    }
+    kilons_irq_restore(flags);
+}
+int process_send_signal(uint32_t caller,int target,int sig,uint32_t real,uint32_t effective,
+                        void (*queue)(uint32_t,int)) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *self=find_locked(caller);
+    int rc=-3;
+    for(unsigned i=0;self && i<PROCESS_SLOTS;i++) {
+        struct process_record *p=&records[i];
+        if(p->state==PROCESS_FREE)continue;
+        if(target>0 && (uint32_t)target!=p->pid)continue;
+        if(!target && p->pgid!=self->pgid)continue;
+        if(target< -1 && p->pgid!=(uint32_t)(-(int64_t)target))continue;
+        if(target==-1 && p->pid==1)continue;
+        if(effective && real!=p->uid && effective!=p->uid &&
+           real!=p->saved_uid && effective!=p->saved_uid && !(sig==18 && p->sid==self->sid)) {
+            if(rc==-3)rc=-1;
+            continue;
+        }
+        rc=0;
+        if(p->state==PROCESS_ZOMBIE)continue;
+        if(sig==9)p->stopped=false;
+        if(sig && queue)queue(p->pid,sig);
+        if(sig==19 && !p->stopped) {
+            p->stopped=true;p->stop_signal=sig;p->stop_event=true;p->continue_event=false;
+        } else if(sig==18 && p->stopped) {
+            p->stopped=false;p->continue_event=true;p->stop_event=false;
+        }
+    }
+    kilons_irq_restore(flags);
+    return rc;
+}
+int process_job_signal(uint32_t caller,int target,int sig,uint32_t real,uint32_t effective) {
+    if(sig!=0 && sig!=19 && sig!=18)return -22;
+    return process_send_signal(caller,target,sig,real,effective,NULL);
+}
+int process_collect_selected(uint32_t parent,int selector,int *status) {
+    return process_wait_event(parent,selector,0,status,false,0);
+}
+int process_collect_group(uint32_t parent,uint32_t group,int *status) {
+    return process_wait_event(parent,0,group,status,false,0);
+}
+int process_collect_any(uint32_t parent,int *status) {
+    return process_collect_selected(parent,-1,status);
+}
+void process_note_uid(uint32_t pid,uint32_t uid,uint32_t saved) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *record=find_locked(pid);
+    if(record){record->uid=uid;record->saved_uid=saved;}
+    kilons_irq_restore(flags);
+}
+void process_mark_exec(uint32_t pid) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid);
+    if(p)p->execed=true;
+    kilons_irq_restore(flags);
+}
+static struct process_record *group_locked(uint32_t pgid) {
+    for(unsigned i=0;i<PROCESS_SLOTS;i++)
+        if(records[i].state!=PROCESS_FREE && records[i].pgid==pgid)return &records[i];
+    return NULL;
+}
+int process_group_id(uint32_t caller,int pid,bool session) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid?(uint32_t)pid:caller);
+    int result=p?(int)(session?p->sid:p->pgid):-3;
+    kilons_irq_restore(flags);
+    return result;
+}
+int process_set_group(uint32_t caller,int pid,int pgid) {
+    if(pgid<0)return -22;
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid?(uint32_t)pid:caller);
+    struct process_record *self=find_locked(caller);
+    int rc=0;
+    if(!self || !p || (p!=self && p->parent!=caller))rc=-3;
+    else if(p!=self && p->execed)rc=-13;
+    else if(p->sid!=self->sid || p->pid==p->sid)rc=-1;
+    else {
+        unsigned group=pgid?(unsigned)pgid:p->pid;
+        struct process_record *member=group_locked(group);
+        if(group!=p->pid && (!member || member->sid!=self->sid))rc=-1;
+        else p->pgid=group;
+    }
+    kilons_irq_restore(flags);
+    return rc;
+}
+int process_new_session(uint32_t pid) {
+    uint64_t flags=kilons_irq_save();
+    struct process_record *p=find_locked(pid);
+    int rc=-1;
+    if(p && !group_locked(pid)) {
+        p->sid=p->pgid=pid;
+        rc=(int)pid;
+    }
+    kilons_irq_restore(flags);
+    return rc;
 }
 enum process_state process_state_of(uint32_t pid) {
     uint64_t flags=kilons_irq_save();

@@ -13,11 +13,23 @@ struct fat_volume {
     uint8_t spc;
 };
 static struct fat_volume vol;
-struct fat_entry {char name[13];uint32_t cluster,size;uint64_t ino;int is_dir;};
-struct fat_handle {int used;uint32_t first,size;size_t offset;uint64_t ino;};
+struct fat_entry {char name[13];uint32_t cluster,size;uint64_t ino;int is_dir;struct file_times times;};
+struct fat_handle {int used;uint32_t first,size;size_t offset;uint64_t ino;struct file_times times;};
 static struct fat_handle handles[HANDLES];
 static uint16_t le16(const uint8_t *p){return (uint16_t)(p[0]|((uint16_t)p[1]<<8));}
 static uint32_t le32(const uint8_t *p){return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24);}
+/* FAT stores calendar values without a timezone. Interpret them as UTC
+ * consistently with the clock used by the rest of the system. */
+static int64_t fat_timestamp(unsigned date,unsigned clock) {
+    unsigned year=1980+(date>>9),month=(date>>5)&15,day=date&31;
+    unsigned hour=clock>>11,minute=(clock>>5)&63,second=(clock&31)*2;
+    if(!month || month>12 || !day || hour>23 || minute>59 || second>59)return 0;
+    static const unsigned lengths[]={31,28,31,30,31,30,31,31,30,31,30,31};
+    unsigned days=0;
+    for(unsigned y=1970;y<year;y++)days+=365+(y%4==0 && (y%100!=0 || y%400==0));
+    for(unsigned m=1;m<month;m++)days+=lengths[m-1]+(m==2 && year%4==0 && year!=2100);
+    return ((int64_t)(days+day-1)*24+hour)*3600+minute*60+second;
+}
 static int read_sector(uint32_t lba,uint8_t dst[SECTOR]) {
     return vol.ready && lba<vol.total && block_read(vol.device,lba,dst);
 }
@@ -75,6 +87,9 @@ static int dir_entry(uint32_t first,unsigned index,struct fat_entry *out) {
                 if(seen++!=index)continue;
                 unsigned k=0;while(name[k]){out->name[k]=name[k];k++;}out->name[k]=0;
                 out->cluster=((uint32_t)le16(d+20)<<16)|le16(d+26);
+                out->times.access=fat_timestamp(le16(d+18),0);
+                out->times.modify=fat_timestamp(le16(d+24),le16(d+22));
+                out->times.change=out->times.modify;
                 out->size=le32(d+28);out->is_dir=!!(d[11]&0x10);
                 out->ino=((uint64_t)lba<<5)|(j/32U);
                 return 1;
@@ -87,7 +102,7 @@ static int dir_entry(uint32_t first,unsigned index,struct fat_entry *out) {
 /* Backend paths have no leading '/' and use canonical components. */
 static int lookup(const char *path,struct fat_entry *out) {
     if(!vol.ready || !path || !out)return -1;
-    if(!*path){*out=(struct fat_entry){{0},vol.root,0,1,1};return 0;}
+    if(!*path){*out=(struct fat_entry){{0},vol.root,0,1,1,{0}};return 0;}
     uint32_t parent=vol.root;
     const char *p=path;
     while(*p) {
@@ -135,7 +150,7 @@ int fat32_vfs_attach(int device) {
 }
 static void info_from_entry(const struct fat_entry *entry,struct ramfs_info *out) {
     out->is_dir=entry->is_dir;out->size=entry->is_dir?0:entry->size;
-    out->mode=entry->is_dir?0555U:0444U;out->uid=0;out->gid=0;out->ino=entry->ino;
+    out->mode=entry->is_dir?0555U:0444U;out->uid=0;out->gid=0;out->ino=entry->ino;out->links=1;out->times=entry->times;out->blocks=((uint64_t)out->size+511)/512;
 }
 int fat32_vfs_stat(const char *path,struct ramfs_info *out) {
     struct fat_entry e;if(!out || lookup(path,&e)<0)return -1;
@@ -154,7 +169,7 @@ int fat32_vfs_open(const char *path,unsigned flags,int create) {
     if(lookup(path,&e)<0 || e.is_dir)return -1;
     if(e.size && !valid(e.cluster))return -1;
     for(unsigned i=0;i<HANDLES;i++)if(!handles[i].used) {
-        handles[i]=(struct fat_handle){1,e.cluster,e.size,0,e.ino};return (int)i;
+        handles[i]=(struct fat_handle){1,e.cluster,e.size,0,e.ino,e.times};return (int)i;
     }
     return -1;
 }
@@ -197,5 +212,5 @@ int fat32_vfs_read(int fd,void *dst,size_t count) {
 int fat32_vfs_fstat(int fd,struct ramfs_info *out) {
     if(!out || fd<0 || fd>=(int)HANDLES || !handles[fd].used)return -1;
     struct fat_handle *h=&handles[fd];
-    *out=(struct ramfs_info){0,h->size,0444U,0,0,h->ino};return 0;
+    *out=(struct ramfs_info){0,h->size,0444U,0,0,h->ino,1,h->times,((uint64_t)h->size+511)/512};return 0;
 }

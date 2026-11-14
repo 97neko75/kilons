@@ -46,15 +46,32 @@ int main(void){
     assert(strcmp(e.name,"renamed")==0);
     assert(kfs_readdir(&fs,"docs/sub",1,&e)==0);
     assert(kfs_rmdir(&fs,"docs/sub")==-K_ENOTEMPTY);
+    assert(kfs_link(&fs,"docs/sub/renamed","alias")==0);
+    unsigned audit=99;
+    assert(kfs_fsck(&fs,&audit)==0 && audit==0);
+    assert(kfs_sync(&fs)==0 && kfs_mount(&fs,dev,0)==0);
+    assert(kfs_stat(&fs,"alias",&info)==0 && info.links==2);
+    int alias=kfs_open(&fs,"alias",KFS_READ,0,0);
+    assert(alias>=0 && kfs_unlink(&fs,"alias")==0);
+    int other=kfs_open(&fs,"replacement",KFS_WRITE,1,0600);
+    assert(other>=0 && kfs_close(&fs,other)==0);
+    assert(kfs_rename(&fs,"replacement","docs/sub/renamed")==0);
+    assert(kfs_fstat(&fs,alias,&info)==0 && info.links==0 && info.size==3);
+    assert(kfs_close(&fs,alias)==0);
     assert(kfs_unlink(&fs,"docs/sub/renamed")==0);
     assert(kfs_rmdir(&fs,"docs/sub")==0);
     assert(kfs_rmdir(&fs,"docs")==0);
     assert(kfs_sync(&fs)==0);
     unsigned errors=99;assert(kfs_fsck(&fs,&errors)==0&&errors==0);
+    assert(kfs_symlink(&fs,"../target","link")==0 && kfs_sync(&fs)==0);
     /* Remount must see persisted metadata, not old cache contents. */
     assert(kfs_mount(&fs,dev,0)==0);
     assert(kfs_stat(&fs,"docs",&info)==-K_ENOENT);
     assert(kfs_fsck(&fs,&errors)==0&&errors==0);
+    char target[16]={0};
+    assert(kfs_stat(&fs,"link",&info)==0 && info.kind==KFS_KIND_SYMLINK);
+    assert(kfs_readlink(&fs,"link",target,sizeof target)==9 && !strcmp(target,"../target"));
+    assert(kfs_unlink(&fs,"link")==0);
     /* Fill remaining inode namespace, checking ENOSPC and no corruption. */
     char name[32];unsigned created=0;
     for(int i=0;i<200;i++){

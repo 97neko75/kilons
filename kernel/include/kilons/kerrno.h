@@ -4,8 +4,10 @@
  * POSIX does not standardize numerical errno values. */
 #define K_EPERM 1
 #define K_ENOENT 2
+#define K_ENXIO 6
 #define K_EIO 5
 #define K_EBADF 9
+#define K_EBUSY 16
 #define K_EAGAIN 11
 #define K_EACCES 13
 #define K_EFAULT 14
@@ -22,4 +24,7 @@
 #define K_ENOTEMPTY 39
 #define K_ELOOP 40
 #define K_EOVERFLOW 75
+#define K_EDEADLK 35
+#define K_ENOLCK 37
+#define K_ENOTSUP 95
 #endif

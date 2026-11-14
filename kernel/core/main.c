@@ -5,6 +5,7 @@
 #include <kilons/memory.h>
 #include <kilons/keyboard.h>
 #include <kilons/interrupt.h>
+#include <kilons/file_time.h>
 #include <kilons/vm.h>
 #include <kilons/heap.h>
 #include <kilons/tss.h>
@@ -63,6 +64,7 @@ void kernel_main(uint32_t multiboot_info_phys) {
     }
     console_write("kilons: bootstrap heap self-test passed\n");
     interrupt_init();
+    wall_clock_init();
     console_write("kilons: IDT/PIC/PIT initialized (100 Hz nominal)\n");
     scheduler_init();
     if (thread_create(worker_a)<0 || thread_create(worker_b)<0) {

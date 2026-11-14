@@ -12,7 +12,7 @@ static uint16_t port;
 static uint8_t drive;
 static uint32_t root_lba,root_size,volume_blocks;
 static int ready;
-struct iso_handle { int used; uint32_t lba,size,offset; };
+struct iso_handle { int used; uint32_t lba,size; size_t offset; };
 static struct iso_handle handles[HANDLES];
 static uint16_t le16(const uint8_t *p) { return (uint16_t)(p[0]|((uint16_t)p[1]<<8)); }
 static uint32_t le32(const uint8_t *p) { return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
@@ -225,10 +225,11 @@ int iso9660_open(const char *path,unsigned flags,int create) {
     return -1;
 }
 int iso9660_close(int fd) {if(fd<0||fd>=HANDLES||!handles[fd].used)return -1;handles[fd].used=0;return 0;}
-int iso9660_seek(int fd,size_t off) {if(fd<0||fd>=HANDLES||!handles[fd].used||off>handles[fd].size)return -1;handles[fd].offset=(uint32_t)off;return 0;}
+int iso9660_seek(int fd,size_t off) {if(fd<0||fd>=HANDLES||!handles[fd].used)return -1;handles[fd].offset=off;return 0;}
 int iso9660_read(int fd,void *dst,size_t n) {
     if(fd<0||fd>=HANDLES||!handles[fd].used||(!dst&&n))return -1;
     struct iso_handle *h=&handles[fd];
+    if(h->offset>=h->size)return 0;
     if(n>h->size-h->offset)n=h->size-h->offset;
     if(n>0x7fffffffU)n=0x7fffffffU;
     size_t done=0;uint8_t *out=dst;

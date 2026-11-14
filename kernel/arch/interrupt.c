@@ -33,6 +33,7 @@ int interrupt_dispatch(const struct frame *f) {
         if ((f->cs & 3U)==3U) {
             uint64_t address=0;
             if(n==14) __asm__ volatile("mov %%cr2,%0":"=r"(address));
+            (void)ring3_preempt(f->regs,f->rip,f->cs,f->flags,f->rsp,f->ss);
             ring3_on_fault(n,f->error,f->rip,address);
             return 1; /* abandon faulting user frame, restore kernel launcher */
         }
@@ -45,10 +46,11 @@ int interrupt_dispatch(const struct frame *f) {
     int switch_user=0;
     if (n == 32) {
         ++ticks;
+        if (ticks % 5 == 0) keyboard_service(); /* Recover buffered input after a missed IRQ1. */
         /* Time slice: 5 PIT ticks = ~50ms. Never preempt a CPL0 handler. */
         if ((f->cs&3U)==3U && ticks%5==0)
             switch_user=ring3_preempt(f->regs,f->rip,f->cs,f->flags,f->rsp,f->ss);
-    } else if (n == 33) keyboard_irq();
+    } else if (n == 33) keyboard_service();
     /* IRQ 32..47: slave must be acknowledged before master. */
     if (n >= 40 && n < 48) outb(0xa0, 0x20);
     if (n >= 32 && n < 48) outb(0x20, 0x20);
@@ -77,8 +79,13 @@ void interrupt_init(void) {
     outb(0x21,0x20); outb(0xa1,0x28);
     outb(0x21,0x04); outb(0xa1,0x02);
     outb(0x21,0x01); outb(0xa1,0x01);
-    outb(0x21,0xfc); /* IRQ0 timer and IRQ1 keyboard only */
+    outb(0x21,0xff);
     outb(0xa1,0xff);
+    const char *keyboard_error = keyboard_init();
+    console_write("kilons: i8042: ");
+    console_write(keyboard_error ? keyboard_error : "port 1 ready (translated set 2)");
+    console_write("\n");
+    outb(0x21,keyboard_error ? 0xfe : 0xfc);
     /* PIT channel 0, mode 3, approximately 100 Hz. */
     uint16_t divisor = 11932;
     outb(0x43,0x36); outb(0x40,(uint8_t)divisor); outb(0x40,(uint8_t)(divisor>>8));

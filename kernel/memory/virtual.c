@@ -140,7 +140,12 @@ void vm_space_destroy(struct vm_space *space) {
         uint64_t pa=space->owned[i];
         if(space->pt)pt_phys(space->pt)[i]=0;
         space->owned[i]=0;
-        if(page_release_mapping(pa))(void)page_free(pa);
+        /* The owner ledger is authoritative even if a fault or a test has
+         * already damaged the mapping bit.  Releasing an absent mapping is
+         * harmless; page_free() then also reclaims an allocated-but-unmarked
+         * frame instead of leaking it during rollback. */
+        (void)page_release_mapping(pa);
+        (void)page_free(pa);
     }
     if(space->pt) (void)page_free(space->pt);
     if(space->pd) (void)page_free(space->pd);
@@ -285,6 +290,15 @@ bool vm_space_check(const struct vm_space *space,uint64_t address,uint64_t lengt
            ((e&W) && !(e&(1ULL<<63))) ||
            (writable && !(e&W)))return false;
     }
+    return true;
+}
+bool vm_space_check_execute(const struct vm_space *space,uint64_t address,uint64_t length) {
+    if(!vm_space_check(space,address,length,false))return false;
+    if(!length)return true;
+    unsigned first=(unsigned)((address-USER_BASE)>>12);
+    unsigned last=(unsigned)((address+length-1-USER_BASE)>>12);
+    const uint64_t *pt=pt_phys(space->pt);
+    for(unsigned i=first;i<=last;i++)if(pt[i]&(1ULL<<63))return false;
     return true;
 }
 bool vm_user_check(uint64_t address,uint64_t length,bool writable) {

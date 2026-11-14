@@ -52,7 +52,9 @@ int main(void){
     assert(vfs_read(file,data,2)==2 && !memcmp(data,"cd",2));
     assert(vfs_lseek(file,0,2)==6);
     assert(vfs_lseek(file,-7,2)==-K_EINVAL);
-    assert(vfs_lseek(file,5,3)==-K_EINVAL);
+    assert(vfs_lseek(file,5,3)==5 && vfs_lseek(file,5,4)==6);
+    assert(vfs_lseek(file,6,3)==-K_ENXIO);
+    assert(vfs_lseek(file,6,4)==6);
     assert(vfs_lseek(file,32770,0)==32770);
     assert(vfs_read(file,data,1)==0);
     assert(vfs_write(file,"A",1)==-1 && vfs_errno()==K_ENOSPC);

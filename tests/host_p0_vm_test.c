@@ -3,6 +3,7 @@
  * making host tests execute privileged MOV CR3 / INVLPG / RDMSR instructions. */
 #define _GNU_SOURCE
 #include <kilons/vm.h>
+#include <kilons/user_signal.h>
 #include <kilons/memory.h>
 #include <assert.h>
 #include <stdint.h>
@@ -67,12 +68,56 @@ static void boot_tables(void){
     words(a)[0]=b|3ULL;words(b)[0]=c|3ULL;
     vm_host_set_cr3(a);
 }
+static void check_signal_frames(void) {
+    struct vm_space vm={0};
+    assert(vm_space_create(&vm));
+    uint64_t code=page_alloc();
+    assert(code);
+    static const uint8_t restorer[KILONS_SIGNAL_RESTORER_BYTES]={
+        0xb8,0x0f,0x00,0x00,0x00,0xcd,0x80
+    };
+    memcpy((void *)(uintptr_t)(code+64),restorer,sizeof restorer);
+    assert(vm_space_map(&vm,0,code,false,true));
+    assert(vm_space_map(&vm,1,page_alloc(),true,false));
+    assert(vm_space_check_execute(&vm,VM_USER_BASE,1));
+    assert(!vm_space_check_execute(&vm,VM_USER_BASE+PAGE,1));
+    uint64_t data=VM_USER_BASE+PAGE,trampoline=VM_USER_BASE+64;
+    struct user_action action={.handler=VM_USER_BASE,.mask=1UL<<SIGUSR2,.flags=SA_RESTART};
+    assert(vm_space_copyout(&vm,data,&action,sizeof action));
+    struct user_context call={.rdi=SIGUSR1,.rsi=data,.r10=trampoline};
+    struct user_signals state={0};
+    assert(signal_action(&state,&vm,&call)==0);
+    call.r10=trampoline+16;
+    assert(signal_action(&state,&vm,&call)==-14);
+    call.r10=trampoline;
+    struct user_context interrupted={.rsp=data+PAGE,.rip=VM_USER_BASE+128,.rax=(uint64_t)-4,.flags=0x602,.cs=0x2b,.ss=0x33};
+    struct user_context live=interrupted;
+    assert(signal_enter(&state,&vm,&live,SIGUSR1));
+    assert(live.rip==action.handler && live.rdi==SIGUSR1 && live.rsp%16==8 && !(live.flags&0x400));
+    uint64_t ret=0;
+    assert(vm_space_copyin(&vm,&ret,live.rsp,sizeof ret) && ret==trampoline);
+    signal_queue(&state,SIGUSR2);
+    assert(!signal_ready(&state));
+    live.rip=action.handler+2;
+    assert(!signal_return(&state,&live) && state.depth==1);
+    live.rip=trampoline+KILONS_SIGNAL_RESTORER_BYTES;
+    assert(signal_return(&state,&live) && !memcmp(&live,&interrupted,sizeof live));
+    assert(signal_ready(&state)==SIGUSR2 && !signal_return(&state,&live));
+    live.rsp=VM_USER_BASE+16;
+    assert(!signal_enter(&state,&vm,&live,SIGUSR1) && !state.depth);
+    live.rsp=0;
+    assert(!signal_enter(&state,&vm,&live,SIGUSR1) && !state.depth);
+    signal_after_exec(&state);
+    assert(!state.actions[SIGUSR1].handler && signal_ready(&state)==SIGUSR2);
+    vm_space_destroy(&vm);
+}
 int main(void){
     void *pool=mmap((void *)(uintptr_t)POOL_BASE,POOL_FRAMES*PAGE,PROT_READ|PROT_WRITE,
                     MAP_PRIVATE|MAP_ANONYMOUS|MAP_FIXED_NOREPLACE,-1,0);
     if(pool==MAP_FAILED){puts("low-address test memory unavailable");return 77;}
     boot_tables();
     assert(vm_init() && vm_user_init());
+    check_signal_frames();
     assert(vm_space_selftest()); /* Includes clone/private copy and anonymous mapping */
     /* Every step of address-space creation must unwind partial allocations. */
     for(unsigned failure=1;failure<=4;failure++) {

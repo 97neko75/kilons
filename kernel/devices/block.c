@@ -2,7 +2,7 @@
 /* All bounds are enforced at the common layer. Never send writes to a
  * read-only disk. No implicit hardware probing in normal boot. */
 #define DEVICES 12
-#define RAM_SECTORS 128
+#define RAM_SECTORS 512
 static struct block_device devices[DEVICES];
 static unsigned count;
 static block_flush_fn flush_ops[DEVICES];

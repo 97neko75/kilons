@@ -12,7 +12,7 @@ int kfs_block_allocate(struct kilofs *fs,uint32_t *out){
     if(!fs||!out||fs->readonly)return -K_EROFS;
     int rc=kfs_cache_read(fs,1,fs->scratch);if(rc<0)return rc;
     uint32_t block=fs->dev.total_blocks;
-    for(uint32_t i=KFS_DATA_START;i<fs->dev.total_blocks;i++)
+    for(uint32_t i=fs->data_start;i<fs->dev.total_blocks;i++)
         if(!(fs->scratch[i/8]&(1U<<(i%8)))){block=i;break;}
     if(block>=fs->dev.total_blocks)return -K_ENOSPC;
     rc=bit_change(fs,1,block,1);if(rc<0)return rc;
@@ -23,8 +23,11 @@ int kfs_block_allocate(struct kilofs *fs,uint32_t *out){
 }
 int kfs_block_free(struct kilofs *fs,uint32_t block){
     if(!fs||fs->readonly)return -K_EROFS;
-    if(block<KFS_DATA_START||block>=fs->dev.total_blocks)return -K_EINVAL;
-    return bit_change(fs,1,block,0);
+    if(block<fs->data_start||block>=fs->dev.total_blocks)return -K_EINVAL;
+    int rc=kfs_cache_read(fs,1,fs->scratch);if(rc<0)return rc;
+    if(!(fs->scratch[block/8]&(1U<<(block%8))))return -K_EIO;
+    fs->scratch[block/8]&=(uint8_t)~(1U<<(block%8));
+    return kfs_cache_write(fs,1,fs->scratch);
 }
 int kfs_inode_allocate(struct kilofs *fs,uint32_t *out){
     if(!fs||!out||fs->readonly)return -K_EROFS;
@@ -38,5 +41,8 @@ int kfs_inode_allocate(struct kilofs *fs,uint32_t *out){
 int kfs_inode_free(struct kilofs *fs,uint32_t ino){
     if(!fs||fs->readonly)return -K_EROFS;
     if(ino<=KFS_ROOT||ino>=KFS_INODES)return -K_EINVAL;
-    return bit_change(fs,2,ino,0);
+    int rc=kfs_cache_read(fs,2,fs->scratch);if(rc<0)return rc;
+    if(!(fs->scratch[ino/8]&(1U<<(ino%8))))return -K_EIO;
+    fs->scratch[ino/8]&=(uint8_t)~(1U<<(ino%8));
+    return kfs_cache_write(fs,2,fs->scratch);
 }

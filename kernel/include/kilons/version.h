@@ -4,5 +4,5 @@
 #define KILONS_VERSION_MAJOR 0
 #define KILONS_VERSION_MINOR 3
 #define KILONS_VERSION_PATCH 4
-#define KILONS_VERSION_STRING "0.3.4-4"
+/* The kernel build supplies KILONS_VERSION_STRING from VERSION. */
 #endif

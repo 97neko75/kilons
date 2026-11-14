@@ -1,1 +1,2 @@
-#include "../../../../include/sys/stat.h"
+#include "types.h"
+#include "../bits/stat.h"

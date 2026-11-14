@@ -25,10 +25,10 @@ char *getenv(const char *key){
 static int import(void){
     if(environ==table)return 0;
     unsigned i=0;
-    while(environ && environ[i]){
-        if(i==SLOTS){errno=12;return -1;}
+    while(environ && i<SLOTS && environ[i]){
         table[i]=environ[i];i++;
     }
+    if(environ && i==SLOTS && environ[i]){errno=12;return -1;}
     table[i]=0;environ=table;return 0;
 }
 int setenv(const char *key,const char *value,int overwrite){
@@ -50,15 +50,33 @@ int unsetenv(const char *key){
     unsigned n=key_size(key);
     if(!n){errno=22;return -1;}
     if(import()<0)return -1;
+    /* Ownership is stored in a position-parallel array.  Snapshot kept
+     * entries before compacting: a move to a lower slot must not overwrite
+     * an owned string which is still the source of a later entry. */
+    char saved[SLOTS][sizeof owned[0]];
+    char *external[SLOTS];
     unsigned dst=0;
     for(unsigned i=0;table[i];i++){
         if(matches(table[i],key,n))continue;
-        if(i!=dst && table[i]==owned[i]){
+        int owned_slot=-1;
+        for(unsigned j=0;j<SLOTS;j++)
+            if(table[i]==owned[j]){owned_slot=(int)j;break;}
+        if(owned_slot>=0){
             unsigned j=0;
-            do {owned[dst][j]=owned[i][j];}while(owned[i][j++]);
-            table[dst]=owned[dst];
-        }else table[dst]=table[i];
+            while(j+1<sizeof saved[0] && owned[owned_slot][j]){
+                saved[dst][j]=owned[owned_slot][j];j++;
+            }
+            saved[dst][j]=0;external[dst]=0;
+        } else external[dst]=table[i];
         dst++;
+    }
+    for(unsigned i=0;i<dst;i++){
+        if(external[i])table[i]=external[i];
+        else{
+            unsigned j=0;
+            do {owned[i][j]=saved[i][j];}while(saved[i][j++]);
+            table[i]=owned[i];
+        }
     }
     table[dst]=0;return 0;
 }

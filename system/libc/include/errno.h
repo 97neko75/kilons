@@ -1,6 +1,19 @@
 #ifndef KILONS_ERRNO_H
 #define KILONS_ERRNO_H
 extern int errno;
+#define ENXIO 6
+#define EIO 5
+#define ENFILE 23
+#define ENOSPC 28
+#define EPIPE 32
+#define ENOMEM 12
+#define ENOTTY 25
+#define ENOSYS 38
+#define EINTR 4
+#define E2BIG 7
+#define ENOEXEC 8
+#define ENOTDIR 20
+#define ENAMETOOLONG 36
 #define EBADF 9
 #define EFAULT 14
 #define EEXIST 17
@@ -9,4 +22,18 @@ extern int errno;
 #define ECHILD 10
 #define EAGAIN 11
 #define EACCES 13
+#define EDEADLK 35
+#define ENOLCK 37
+#define EINVAL 22
+#define EOVERFLOW 75
+#define ELOOP 40
+#define EISDIR 21
+#define ERANGE 34
+#define EPERM 1
+#define EROFS 30
+#define EMFILE 24
+#define ENOTSUP 95
+#define EXDEV 18
+#define ENOTEMPTY 39
+#define ESRCH 3
 #endif
