@@ -39,6 +39,12 @@ kilons是一个正在开发的自由开源操作系统，采用单体内核架�
 ## 怎么编译？
 
 Ubuntu 24.04
+
+```bash
+sudo apt update
+sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
+```
+
 Ubuntu 26.04
 
 ```bash
