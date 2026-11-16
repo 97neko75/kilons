@@ -32,14 +32,14 @@ Ubuntu 24.04
 
 ```bash
 sudo apt update
-sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
+sudo apt install make build-essential python3 unzip curl ca-certificates tar qemu-system-x86 xorriso
 ```
 
 Ubuntu 26.04
 
 ```bash
 sudo apt update
-sudo apt install make build-essential nasm qemu-system-x86 xorriso mtools grub-pc-bin grub-efi-amd64-bin
+sudo apt install make build-essential python3 unzip curl ca-certificates tar qemu-system-x86 xorriso
 ```
 
 Arch 平台：
