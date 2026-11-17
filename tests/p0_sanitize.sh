@@ -30,4 +30,6 @@ build/sanitize/kilofs
 build/sanitize/kilofs_indirect
 "$CC" $FLAGS $KILOFS_SRCS tests/host_kilofs_fault_test.c -o build/sanitize/kilofs_fault
 build/sanitize/kilofs_fault
+"$CC" $FLAGS $KILOFS_SRCS tests/host_kilofs_stress_test.c -o build/sanitize/kilofs_stress
+build/sanitize/kilofs_stress
 echo "P0/POSIX/KILOFS $CC ASan/UBSan hosted suite: PASS"

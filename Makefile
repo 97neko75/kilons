@@ -3,7 +3,25 @@ LD ?= ld
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror -ffreestanding -fno-stack-protector -fno-pic -fno-pie -m64 -mno-red-zone -mgeneral-regs-only -mcmodel=kernel -Ikernel/include
 ASFLAGS := -m64
 BUILD := build
-OBJS := $(BUILD)/user_signal.o $(BUILD)/wall_clock.o $(BUILD)/boot.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/process.o $(BUILD)/context.o $(BUILD)/block.o $(BUILD)/boot_module.o $(BUILD)/ata_pio.o $(BUILD)/fat32.o $(BUILD)/fat32_vfs.o $(BUILD)/ramfs.o $(BUILD)/vfs.o $(BUILD)/iso9660.o $(BUILD)/power.o $(BUILD)/ring3.o $(BUILD)/exec_args.o $(BUILD)/ring3_entry.o $(BUILD)/posix.o $(BUILD)/record_lock.o
+ISO_DIR := $(BUILD)/iso
+ISO_BOOT_DIR := $(ISO_DIR)/boot/kilons
+ISO_LIMINE_DIR := $(ISO_DIR)/boot/limine
+ISO_KERNEL_IMAGE := $(ISO_BOOT_DIR)/kernel.elf
+ISO_ROOTFS_IMAGE := $(ISO_BOOT_DIR)/rootfs.kilofs
+ISO_INITRAMFS_IMAGE := $(ISO_BOOT_DIR)/initramfs.img
+LIMINE_VERSION ?= 12.9.6
+LIMINE_ROOT := $(BUILD)/limine
+LIMINE_ARCHIVE := $(LIMINE_ROOT)/limine-binary.tar.gz
+LIMINE_BINARY := $(LIMINE_ROOT)/limine-binary
+LIMINE_READY := $(LIMINE_ROOT)/.ready
+LIMINE_URL ?= https://github.com/limine-bootloader/limine/releases/download/v$(LIMINE_VERSION)/limine-binary.tar.gz
+# Keep the released Limine assets in the source package so a clean checkout
+# can build offline.  Set LIMINE_VENDOR_ARCHIVE= to force the network fallback.
+LIMINE_VENDOR_ARCHIVE ?= vendor/limine/limine-binary.tar.gz
+# kilons initramfs uses the native KILOFS image format, not Linux cpio.
+INITRAMFS_KILOFS := $(BUILD)/initramfs.kilofs
+INITRAMFS_BLOCKS ?= 1024
+OBJS := $(BUILD)/user_signal.o $(BUILD)/wall_clock.o $(BUILD)/boot.o $(BUILD)/limine.o $(BUILD)/kernel.o $(BUILD)/console.o $(BUILD)/serial.o $(BUILD)/physical.o $(BUILD)/keyboard.o $(BUILD)/interrupt.o $(BUILD)/interrupt_stubs.o $(BUILD)/virtual.o $(BUILD)/heap.o $(BUILD)/tss.o $(BUILD)/scheduler.o $(BUILD)/process.o $(BUILD)/context.o $(BUILD)/block.o $(BUILD)/boot_module.o $(BUILD)/ata_pio.o $(BUILD)/fat32.o $(BUILD)/fat32_vfs.o $(BUILD)/ramfs.o $(BUILD)/vfs.o $(BUILD)/iso9660.o $(BUILD)/power.o $(BUILD)/ring3.o $(BUILD)/exec_args.o $(BUILD)/ring3_entry.o $(BUILD)/posix.o $(BUILD)/record_lock.o
 .PHONY: all clean iso run run-fat32
 all: $(BUILD)/kilons.elf
 $(BUILD):
@@ -12,15 +30,17 @@ $(BUILD)/wall_clock.o: kernel/arch/amd64/wall_clock.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/boot.o: boot/amd64/entry.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
-$(BUILD)/boot_module.o: kernel/devices/boot_module.c kernel/include/kilons/boot_module.h | $(BUILD)
+$(BUILD)/limine.o: kernel/boot/limine.c kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/kernel.o: kernel/core/main.c VERSION kernel/include/kilons/version.h kernel/include/kilons/boot_module.h | $(BUILD)
+$(BUILD)/boot_module.o: kernel/devices/boot_module.c kernel/include/kilons/boot_module.h kernel/include/kilons/limine.h | $(BUILD)
+	$(CC) $(CFLAGS) -c $< -o $@
+$(BUILD)/kernel.o: kernel/core/main.c VERSION kernel/include/kilons/version.h kernel/include/kilons/boot_module.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -DKILONS_VERSION_STRING='"$(strip $(file <VERSION))"' -c $< -o $@
-$(BUILD)/console.o: kernel/drivers/console.c | $(BUILD)
+$(BUILD)/console.o: kernel/drivers/console.c kernel/drivers/console_font.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/serial.o: kernel/drivers/serial.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/physical.o: kernel/memory/physical.c | $(BUILD)
+$(BUILD)/physical.o: kernel/memory/physical.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/keyboard.o: kernel/drivers/keyboard.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -28,7 +48,7 @@ $(BUILD)/interrupt.o: kernel/arch/interrupt.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/interrupt_stubs.o: boot/amd64/interrupts.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
-$(BUILD)/virtual.o: kernel/memory/virtual.c | $(BUILD)
+$(BUILD)/virtual.o: kernel/memory/virtual.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/heap.o: kernel/memory/heap.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -48,20 +68,60 @@ $(BUILD)/vfs.o: kernel/filesystem/vfs/vfs.c include/dirent.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/iso9660.o: kernel/filesystem/iso9660.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/power.o: kernel/arch/amd64/power.c | $(BUILD)
+$(BUILD)/power.o: kernel/arch/amd64/power.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/context.o: boot/amd64/context.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
 $(BUILD)/kilons.elf: $(OBJS) boot/amd64/linker.ld
 	$(LD) -m elf_x86_64 -nostdlib -z max-page-size=0x1000 -T boot/amd64/linker.ld -o $@ $(OBJS)
-iso: all rootfs-kilofs
-	@command -v grub-mkrescue >/dev/null || (echo 'grub-mkrescue is required' && exit 1)
-	mkdir -p $(BUILD)/iso/boot/grub
-	cp $(BUILD)/kilons.elf $(BUILD)/iso/boot/kilons.elf
-	cp boot/grub/grub.cfg $(BUILD)/iso/boot/grub/grub.cfg
-	cp $(ROOTFS) $(BUILD)/iso/boot/rootfs.kilofs
-	cp tests/iso-hello.txt $(BUILD)/iso/HELLO.TXT
-	grub-mkrescue -o $(BUILD)/kilons.iso $(BUILD)/iso
+iso: all rootfs-kilofs initramfs-kilofs $(LIMINE_READY)
+	@command -v xorriso >/dev/null || (echo 'xorriso is required' && exit 1)
+	rm -rf -- $(ISO_DIR)
+	mkdir -p $(ISO_LIMINE_DIR) $(ISO_BOOT_DIR) $(ISO_DIR)/EFI/BOOT
+	cp $(BUILD)/kilons.elf $(ISO_KERNEL_IMAGE)
+	cp boot/limine/limine.conf $(ISO_LIMINE_DIR)/limine.conf
+	cp $(ROOTFS) $(ISO_ROOTFS_IMAGE)
+	cp $(INITRAMFS_KILOFS) $(ISO_INITRAMFS_IMAGE)
+	cp $(LIMINE_BINARY)/limine-bios.sys $(ISO_LIMINE_DIR)/limine-bios.sys
+	cp $(LIMINE_BINARY)/limine-bios-cd.bin $(ISO_LIMINE_DIR)/limine-bios-cd.bin
+	cp $(LIMINE_BINARY)/limine-uefi-cd.bin $(ISO_LIMINE_DIR)/limine-uefi-cd.bin
+	cp $(LIMINE_BINARY)/BOOTX64.EFI $(ISO_DIR)/EFI/BOOT/BOOTX64.EFI
+	cp tests/iso-hello.txt $(ISO_DIR)/HELLO.TXT
+	xorriso -as mkisofs -R -r -J \
+		-b boot/limine/limine-bios-cd.bin -no-emul-boot -boot-load-size 4 -boot-info-table \
+		-hfsplus -apm-block-size 2048 \
+		--efi-boot boot/limine/limine-uefi-cd.bin \
+		-efi-boot-part --efi-boot-image --protective-msdos-label \
+		$(ISO_DIR) -o $(BUILD)/kilons.iso
+	$(LIMINE_BINARY)/limine bios-install $(BUILD)/kilons.iso
+
+$(LIMINE_ARCHIVE): | $(BUILD)
+	@set -eu; \
+	mkdir -p $(LIMINE_ROOT); \
+	tmp=$$(mktemp -- $(LIMINE_ARCHIVE).XXXXXX); \
+	trap 'rm -f -- "$$tmp"' EXIT; \
+	if test -n "$(LIMINE_VENDOR_ARCHIVE)" && test -f "$(LIMINE_VENDOR_ARCHIVE)"; then \
+		cp -- "$(LIMINE_VENDOR_ARCHIVE)" "$$tmp"; \
+	else \
+		command -v curl >/dev/null || { echo 'curl is required to fetch Limine assets' >&2; exit 1; }; \
+		curl -fL --retry 5 --retry-all-errors --retry-delay 2 --connect-timeout 10 --max-time 120 \
+			"$(LIMINE_URL)" -o "$$tmp"; \
+	fi; \
+	mv -fT -- "$$tmp" "$(LIMINE_ARCHIVE)"
+
+$(LIMINE_READY): $(LIMINE_ARCHIVE)
+	@set -eu; \
+	tmp=$$(mktemp -d -- $(LIMINE_ROOT).extract.XXXXXX); \
+	trap 'rm -rf -- "$$tmp"' EXIT; \
+	tar -xzf $(LIMINE_ARCHIVE) -C "$$tmp"; \
+	rm -rf -- $(LIMINE_BINARY); \
+	mv -- "$$tmp/limine-binary" $(LIMINE_BINARY); \
+	$(CC) -std=c99 -D_FILE_OFFSET_BITS=64 -O2 -Wall -Wextra -Werror \
+		$(LIMINE_BINARY)/limine.c -o $(LIMINE_BINARY)/limine; \
+	touch $@
+
+.PHONY: limine-assets
+limine-assets: $(LIMINE_READY)
 # Normal development boot: no FAT32 test disk is required.
 run: iso
 	qemu-system-x86_64 -cdrom $(BUILD)/kilons.iso -m 256M -serial stdio -display gtk -no-reboot
@@ -79,7 +139,7 @@ clean:
 
 $(BUILD)/exec_args.o: kernel/process/exec_args.c kernel/include/kilons/exec_args.h include/exec_limits.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/ring3.o: kernel/arch/amd64/ring3.c include/signal_numbers.h kernel/include/kilons/exec_args.h include/exec_limits.h | $(BUILD)
+$(BUILD)/ring3.o: kernel/arch/amd64/ring3.c include/signal_numbers.h kernel/include/kilons/exec_args.h kernel/include/kilons/memory.h include/exec_limits.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/ring3_entry.o: boot/amd64/ring3.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
@@ -124,6 +184,8 @@ check-kilofs:
 	./$(BUILD)/host_kilofs_test
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -Ikernel/include $(KILOFS_SRCS) tests/host_kilofs_indirect_test.c -o $(BUILD)/host_kilofs_indirect_test
 	./$(BUILD)/host_kilofs_indirect_test
+	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -Ikernel/include $(KILOFS_SRCS) tests/host_kilofs_stress_test.c -o $(BUILD)/host_kilofs_stress_test
+	./$(BUILD)/host_kilofs_stress_test
 
 .PHONY: tools-kilofs
 $(BUILD)/mkfs.kilofs: tools/mkfs.kilofs.c tools/kilofs_image.h $(KILOFS_SRCS) | $(BUILD)
@@ -230,6 +292,17 @@ rootfs-kilofs: $(BUILD)/mkrootfs.kilofs $(BUILD)/fsck.kilofs $(USER_ROOTFS_ELFS)
 	./$(BUILD)/mkrootfs.kilofs "$$tmp/image" "$(BLOCKS)" /bin/stress=$(BUILD)/user_kregress.elf /bin/test19=$(BUILD)/user_kregress.elf /sbin/init=$(BUILD)/user_init.elf /bin/sh=$(BUILD)/user_pks.elf $(foreach p,$(USER_ROOTFS_PROGRAMS),/bin/$(p)=$(BUILD)/user_$(p).elf); \
 	./$(BUILD)/fsck.kilofs "$$tmp/image"; \
 	mv -fT -- "$$tmp/image" "$(ROOTFS)"
+.PHONY: initramfs-kilofs
+# Build a small, disposable boot image with only the init process and shell.
+# The image is KILOFS so the existing kernel can validate and boot it without
+# introducing a second archive format or a cpio dependency.
+initramfs-kilofs: $(BUILD)/mkrootfs.kilofs $(BUILD)/fsck.kilofs $(BUILD)/user_init.elf $(BUILD)/user_pks.elf
+	@set -eu; test ! -e "$(INITRAMFS_KILOFS)" || test -f "$(INITRAMFS_KILOFS)"; \
+	tmp=$$(mktemp -d -- "$(INITRAMFS_KILOFS).XXXXXX"); \
+	trap 'rm -rf -- "$$tmp"' EXIT; \
+	./$(BUILD)/mkrootfs.kilofs "$$tmp/image" "$(INITRAMFS_BLOCKS)" /sbin/init=$(BUILD)/user_init.elf /bin/sh=$(BUILD)/user_pks.elf; \
+	./$(BUILD)/fsck.kilofs "$$tmp/image"; \
+	mv -fT -- "$$tmp/image" "$(INITRAMFS_KILOFS)"
 .PHONY: run-rootfs-kilofs
 run-rootfs-kilofs: iso
 	@test -f "$(ROOTFS)" || (echo 'Run make rootfs-kilofs first' && exit 1)
@@ -253,8 +326,8 @@ check-p0: | $(BUILD)
 	$(CC) -std=c11 -O2 -g -Wall -Wextra -Werror -Ikernel/include tests/host_p0_syscalls_test.c kernel/arch/amd64/posix.c kernel/filesystem/vfs/record_lock.c kernel/filesystem/vfs/vfs.c kernel/filesystem/ramfs.c kernel/filesystem/fat32_vfs.c kernel/devices/block.c $(KILOFS_SRCS) kernel/filesystem/kilofs/block_adapter.c -o $(BUILD)/host_p0_syscalls_test
 	./$(BUILD)/host_p0_syscalls_test
 
-# Optional on a machine with QEMU and grub-mkrescue. The hosted tests above
-# cannot verify real interrupts, CR3, ELFs or GRUB module placement.
+# Optional on a machine with QEMU and Limine ISO tooling. The hosted tests
+# cannot verify real interrupts, CR3, ELFs or Limine module placement.
 .PHONY: check-qemu-p0
 check-qemu-p0: iso
 	sh tests/qemu_p0_smoke.sh
@@ -276,6 +349,20 @@ check-boot-root: rootfs-kilofs
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_boot_root_test.c kernel/filesystem/vfs/vfs.c kernel/filesystem/ramfs.c kernel/filesystem/fat32_vfs.c kernel/devices/block.c $(KILOFS_SRCS) kernel/filesystem/kilofs/block_adapter.c -o $(BUILD)/host_boot_root
 	$(BUILD)/host_boot_root "$(ROOTFS)" /bin/sh /bin/stress /bin/test19 $(addprefix /bin/,$(USER_ROOTFS_PROGRAMS))
 
+.PHONY: check-initramfs
+check-initramfs: initramfs-kilofs
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_initramfs_test.c kernel/filesystem/vfs/vfs.c kernel/filesystem/ramfs.c kernel/filesystem/fat32_vfs.c kernel/devices/block.c $(KILOFS_SRCS) kernel/filesystem/kilofs/block_adapter.c -o $(BUILD)/host_initramfs_test
+	$(BUILD)/host_initramfs_test "$(INITRAMFS_KILOFS)"
+
+.PHONY: check-boot-menu
+check-boot-menu:
+	python3 tests/check_limine_menu.py
+
+.PHONY: check-boot-corrupt
+check-boot-corrupt: initramfs-kilofs
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_boot_corrupt_test.c kernel/filesystem/vfs/vfs.c kernel/filesystem/ramfs.c kernel/filesystem/fat32_vfs.c kernel/devices/block.c $(KILOFS_SRCS) kernel/filesystem/kilofs/block_adapter.c -o $(BUILD)/host_boot_corrupt
+	$(BUILD)/host_boot_corrupt "$(INITRAMFS_KILOFS)"
+
 .PHONY: check-exec
 check-exec: | $(BUILD)
 	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_exec_args_test.c kernel/process/exec_args.c -o $(BUILD)/host_exec_args
@@ -286,10 +373,11 @@ check-exec: | $(BUILD)
 $(addprefix $(BUILD)/user_,$(addsuffix .elf,$(USER_ROOTFS_PROGRAMS) init)): include/exec_limits.h include/record_lock.h
 
 .PHONY: check-core check-core-guest
-check-core: all rootfs-kilofs
-	$(MAKE) check check-exec check-pks check-p0 check-kilofs check-kilofs-fault check-vfs-kilofs check-boot-root check-sysroot
+check-core: all rootfs-kilofs initramfs-kilofs
+	$(MAKE) check check-exec check-pks check-p0 check-kilofs check-kilofs-fault check-vfs-kilofs check-boot-root check-initramfs check-boot-corrupt check-boot-menu check-sysroot
 check-core-guest: iso
 	python3 tests/qemu_core_test.py $(BUILD)/kilons.iso
+	python3 tests/qemu_core_test.py --initramfs $(BUILD)/kilons.iso
 
 $(BUILD)/user_signal.o: kernel/process/user_signal.c kernel/include/kilons/user_signal.h include/signal_numbers.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@

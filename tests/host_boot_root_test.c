@@ -1,4 +1,5 @@
-/* Mount the exact image built for GRUB through the production block/VFS code. */
+/* Mount the exact image embedded by the Limine rootfs entry through the
+ * production block/VFS code. */
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>

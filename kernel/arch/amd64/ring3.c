@@ -1,4 +1,5 @@
 #include <stdint.h>
+#include <kilons/keyboard.h>
 #include <stdbool.h>
 #include <stddef.h>
 #include <kilons/memory.h>
@@ -99,7 +100,8 @@ static bool load_elf(struct vm_space *space,const unsigned char *file,size_t len
     for(unsigned j=0;j<IMAGE_PAGES;j++) if(used[j]) {
         uint64_t pa=page_alloc();if(!pa)return false;
         physical[j]=pa;
-        uint8_t *dst=(uint8_t *)(uintptr_t)pa;
+        uint8_t *dst=(uint8_t *)memory_phys_ptr(pa);
+        if(!dst)return false;
         for(unsigned k=0;k<PAGE;k++)dst[k]=0;
         if(!vm_space_map(space,j,pa,writable[j],executable_page[j])) { (void)page_free(pa);return false; }
     }
@@ -107,7 +109,9 @@ static bool load_elf(struct vm_space *space,const unsigned char *file,size_t len
         const struct phdr *seg=&ph[i];if(seg->type!=1)continue;
         for(uint64_t j=0;j<seg->filesz;j++) {
             uint64_t offset=seg->vaddr+j-VM_USER_BASE;
-            ((uint8_t *)(uintptr_t)physical[offset/PAGE])[offset%PAGE]=file[seg->offset+j];
+            uint8_t *dst=(uint8_t *)memory_phys_ptr(physical[offset/PAGE]);
+            if(!dst)return false;
+            dst[offset%PAGE]=file[seg->offset+j];
         }
     }
     *entry=h->entry;
@@ -116,7 +120,8 @@ static bool load_elf(struct vm_space *space,const unsigned char *file,size_t len
 static bool load_stack(struct vm_space *space) {
     for(unsigned i=STACK_PAGE;i<STACK_PAGE+4;i++) {
         uint64_t pa=page_alloc();if(!pa)return false;
-        uint8_t *dst=(uint8_t *)(uintptr_t)pa;
+        uint8_t *dst=(uint8_t *)memory_phys_ptr(pa);
+        if(!dst)return false;
         for(unsigned j=0;j<PAGE;j++)dst[j]=0;
         if(!vm_space_map(space,i,pa,true,false)) { (void)page_free(pa);return false; }
     }
@@ -831,7 +836,12 @@ void ring3_boot(void) {
             if(!process_live_count())break;
             /* Guest boot fix: do not switch kernel worker contexts while
              * the Ring 3 dispatcher owns the launcher's saved stack. */
-            __asm__ volatile("sti;hlt");
+            /* Poll the controller while idle as well. Firmware interrupt
+             * routing may leave IRQ1 unavailable after bootloader handoff.
+             * HLT would prevent the dispatcher from seeing queued input. */
+            __asm__ volatile("cli" ::: "memory");
+            keyboard_service();
+            __asm__ volatile("sti;pause");
             wake_waiters();
         }
     }

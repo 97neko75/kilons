@@ -26,14 +26,64 @@ static void flush(uint64_t va) { (void)va; }
 static uint64_t cr3(void) { uint64_t v; __asm__ volatile("mov %%cr3,%0":"=r"(v)); return v & ADDR; }
 static void flush(uint64_t va) { __asm__ volatile("invlpg (%0)" :: "r"(va) : "memory"); }
 #endif
-static uint64_t *directory(void) {
-    uint64_t *pml4 = (uint64_t *)(uintptr_t)cr3();
-    if (!(pml4[0] & P)) return NULL;
-    uint64_t *pdpt = (uint64_t *)(uintptr_t)(pml4[0] & ADDR);
-    if (!(pdpt[0] & P)) return NULL;
-    return (uint64_t *)(uintptr_t)(pdpt[0] & ADDR);
+static void *phys_ptr(uint64_t pa) {
+#ifdef KILONS_HOST_TEST
+    return (void *)(uintptr_t)pa;
+#else
+    return memory_phys_ptr(pa);
+#endif
 }
+static uint64_t *pt_phys(uint64_t pa) { return (uint64_t *)phys_ptr(pa); }
 static void zero_pt(uint64_t *pt) { for (unsigned i=0;i<512;i++) pt[i]=0; }
+static uint64_t *directory(void) {
+    uint64_t *pml4 = pt_phys(cr3());
+    if (!pml4) return NULL;
+    bool made_pdpt=false, made_pd=false;
+    if (!(pml4[0] & P)) {
+        uint64_t phys=page_alloc();
+        if (!phys) return NULL;
+        uint64_t *table=pt_phys(phys);
+        if (!table) { (void)page_free(phys); return NULL; }
+        zero_pt(table);
+        pml4[0]=phys|P|W;
+        made_pdpt=true;
+    }
+    if (pml4[0] & HUGE) return NULL;
+    uint64_t *pdpt=pt_phys(pml4[0]&ADDR);
+    if (!pdpt) return NULL;
+    if (!(pdpt[0] & P)) {
+        uint64_t phys=page_alloc();
+        if (!phys) {
+            if (made_pdpt) { (void)page_free(pml4[0]&ADDR); pml4[0]=0; }
+            return NULL;
+        }
+        uint64_t *table=pt_phys(phys);
+        if (!table) {
+            (void)page_free(phys);
+            if (made_pdpt) { (void)page_free(pml4[0]&ADDR); pml4[0]=0; }
+            return NULL;
+        }
+        zero_pt(table);
+        pdpt[0]=phys|P|W;
+        made_pd=true;
+    }
+    if (pdpt[0] & HUGE) return NULL;
+    uint64_t *pd=pt_phys(pdpt[0]&ADDR);
+    if (!pd) return NULL;
+    /* Limine's high-half bootstrap does not promise low identity mappings.
+     * Recreate the bounded 1 GiB supervisor identity window used by the
+     * existing VM and physical-page self-tests. */
+    for (unsigned i=0;i<512;i++) {
+        uint64_t expected=(uint64_t)i*0x200000ULL|P|W|HUGE;
+        if (!(pd[i]&P)) pd[i]=expected;
+        else if ((pd[i]&(ADDR|P|W|HUGE))!=expected) {
+            if (made_pd) { (void)page_free(pdpt[0]&ADDR); pdpt[0]=0; }
+            if (made_pdpt) { (void)page_free(pml4[0]&ADDR); pml4[0]=0; }
+            return NULL;
+        }
+    }
+    return pd;
+}
 bool vm_init(void) {
     uint64_t *pd=directory();
     if (!pd || ready) return false;
@@ -129,7 +179,6 @@ bool vm_user_init(void) {
     }
     return true;
 }
-static uint64_t *pt_phys(uint64_t pa) { return (uint64_t *)(uintptr_t)pa; }
 void vm_space_destroy(struct vm_space *space) {
     if(!space) return;
     if(active_space==space) vm_space_activate(NULL);
@@ -174,7 +223,7 @@ bool vm_space_create(struct vm_space *space) {
     }
     uint64_t *original=pt_phys(kernel_cr3);
     /* Fail closed if the saved bootstrap directory is malformed. */
-    if(!(original[0]&P) || (original[0]&HUGE) ||
+    if(!original || !(original[0]&P) || (original[0]&HUGE) ||
        !original[0] || !(original[0]&ADDR))goto fail;
     uint64_t *original_pdpt=pt_phys(original[0]&ADDR);
     if(!(original_pdpt[0]&P) || (original_pdpt[0]&HUGE) ||
@@ -182,6 +231,11 @@ bool vm_space_create(struct vm_space *space) {
     uint64_t *original_pd=pt_phys(original_pdpt[0]&ADDR);
     uint64_t *pml4=pt_phys(space->pml4),*pdpt=pt_phys(space->pdpt);
     uint64_t *pd=pt_phys(space->pd);
+    /* Limine may mark an HHDM root entry user-accessible even though the
+     * mapping is only used by the kernel.  Never carry that privilege into a
+     * process CR3: supervisor code can still use the mapping with U cleared,
+     * while Ring 3 cannot reach the HHDM. */
+    for(unsigned i=0;i<512;i++)pml4[i]=original[i]&~U;
     for(unsigned i=0;i<512;i++)pd[i]=original_pd[i];
     for(unsigned i=1;i<512;i++)pdpt[i]=original_pdpt[i];
     /* The private user PDE may only be installed over a supervisor mapping. */
@@ -220,6 +274,10 @@ static bool vm_space_chain_ok(const struct vm_space *s) {
     const uint64_t *pml4=pt_phys(s->pml4);
     const uint64_t *pdpt=pt_phys(s->pdpt);
     const uint64_t *pd=pt_phys(s->pd);
+    const uint64_t *kernel=pt_phys(kernel_cr3);
+    if(!pml4 || !pdpt || !pd || !kernel)return false;
+    for(unsigned i=1;i<512;i++)
+        if((pml4[i]&~(ACCESSED|U))!=(kernel[i]&~(ACCESSED|U)) || (pml4[i]&U))return false;
     /* Hardware can set A on all three upper-level entries during iret
      * and user execution. Preserve exact validation of all other bits. */
     return (pml4[0]&~ACCESSED)==(s->pdpt|P|W|U) &&
@@ -231,12 +289,9 @@ bool vm_space_validate(const struct vm_space *s) {
     /* A stray U/S bit in a different PDE would expose supervisor identity
      * mappings directly to Ring 3 even though syscall ranges are checked.
      * Audit the entire private hierarchy before first dispatch / fork. */
-    const uint64_t *pml4=pt_phys(s->pml4);
     const uint64_t *pdpt=pt_phys(s->pdpt);
     const uint64_t *pd=pt_phys(s->pd);
-    for(unsigned i=1;i<512;i++) {
-        if(pml4[i] || (pdpt[i]&U))return false;
-    }
+    for(unsigned i=1;i<512;i++) if(pdpt[i]&U)return false;
     for(unsigned i=0;i<512;i++) {
         if(i!=(USER_BASE>>21) && (pd[i]&U))return false;
     }
@@ -341,7 +396,7 @@ bool vm_space_selftest(void) {
     a=page_alloc();b=page_alloc();
     if(!a || !b || a==b)goto out;
     if(!vm_space_map(&first,0,a,true,false))goto out;
-    a=0; /* ownership transferred to the address space */
+    a=0;
     if(!vm_space_map(&second,0,b,true,false))goto out;
     b=0;
     uint64_t *fa=pt_phys(first.pt),*fb=pt_phys(second.pt);
@@ -352,14 +407,13 @@ bool vm_space_selftest(void) {
        !vm_space_check(&second,VM_USER_BASE,8,true) ||
        vm_space_check(&first,VM_USER_BASE-1,2,false) ||
        vm_space_check(&first,VM_USER_BASE+4095,2,false) ||
-       vm_space_check(&first,0x100000,8,false))goto out;
-    if(vm_space_map(&first,1,fa[0]&ADDR,true,false))goto out;
+       vm_space_check(&first,0x100000,8,false) ||
+       vm_space_map(&first,1,fa[0]&ADDR,true,false))goto out;
     uint64_t sample=0x5a39b42ce7296810ULL,read_back=0;
     if(!vm_space_copyout(&first,VM_USER_BASE+64,&sample,sizeof sample) ||
        !vm_space_copyin(&first,&read_back,VM_USER_BASE+64,sizeof read_back) ||
-       read_back!=sample)goto out;
-    if(!vm_space_clone(&clone,&first))goto out;
-    if(vm_space_clone(&clone,&first) || vm_space_clone(&first,&first))goto out;
+       read_back!=sample || !vm_space_clone(&clone,&first) ||
+       vm_space_clone(&clone,&first) || vm_space_clone(&first,&first))goto out;
     read_back=0;
     if(!vm_space_copyin(&clone,&read_back,VM_USER_BASE+64,sizeof read_back) ||
        read_back!=sample || (pt_phys(clone.pt)[0]&ADDR)==(fa[0]&ADDR))goto out;
@@ -502,7 +556,8 @@ static bool vm_space_transfer(const struct vm_space *space,uint64_t user,void *b
         unsigned page=(unsigned)((addr-USER_BASE)>>12);
         size_t offset=(size_t)(addr&4095ULL),n=4096-offset;
         if(n>length-done)n=length-done;
-        uint8_t *mapped=(uint8_t *)(uintptr_t)((pt[page]&ADDR)+offset);
+        uint8_t *mapped=(uint8_t *)phys_ptr((pt[page]&ADDR)+offset);
+        if(!mapped)return false;
         for(size_t i=0;i<n;i++) {
             if(to_user)mapped[i]=bytes[done+i];
             else bytes[done+i]=mapped[i];

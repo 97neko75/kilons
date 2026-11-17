@@ -3,9 +3,11 @@
 #include <kilons/io.h>
 #include <kilons/power.h>
 #include <kilons/console.h>
+#include <kilons/memory.h>
+#include <kilons/limine.h>
 
-/* Bootstrap maps physical addresses below 4 GiB. XSDT entries above
- * that boundary still need a future on-demand physical mapping API. */
+/* ACPI table addresses are physical. Limine's HHDM makes the firmware
+ * ranges available without relying on a low identity mapping. */
 #define PHYS_LIMIT 0x100000000ULL
 #define SLP_EN 0x2000u
 #define SLP_TYP_MASK 0x1c00u
@@ -14,16 +16,22 @@ static uint16_t rd16(const uint8_t *p) { return (uint16_t)p[0] | (uint16_t)((uin
 static uint32_t rd32(const uint8_t *p) { return (uint32_t)rd16(p) | ((uint32_t)rd16(p+2)<<16); }
 static uint64_t rd64(const uint8_t *p) { return (uint64_t)rd32(p) | ((uint64_t)rd32(p+4)<<32); }
 static int eq(const uint8_t *p,const char *s,unsigned n) { for(unsigned i=0;i<n;i++) if(p[i]!=(uint8_t)s[i]) return 0; return 1; }
-static int range(uint64_t a,uint32_t n) { return a>=0x400 && n && a<PHYS_LIMIT && n<=PHYS_LIMIT-a; }
+static int range(uint64_t a,uint32_t n) {
+    return a>=0x400 && n && a<PHYS_LIMIT && n<=PHYS_LIMIT-a &&
+           memory_phys_ptr(a)!=NULL;
+}
 static int checksum(const uint8_t *p,uint32_t n) { uint8_t s=0; for(uint32_t i=0;i<n;i++) s=(uint8_t)(s+p[i]); return s==0; }
 static const uint8_t *table(uint64_t addr,const char *sig) {
     if(!range(addr,36)) return NULL;
-    const uint8_t *p=(const uint8_t *)(uintptr_t)addr;
+    const uint8_t *p=(const uint8_t *)memory_phys_ptr(addr);
+    if(!p)return NULL;
     uint32_t n=rd32(p+4);
     if(!eq(p,sig,4)||n<36||n>1024*1024||!range(addr,n)||!checksum(p,n)) return NULL;
     return p;
 }
 static const uint8_t *rsdp(void) {
+    const uint8_t *provided=(const uint8_t *)limine_rsdp_address();
+    if(provided)return provided;
     uint16_t seg;
     __asm__ volatile("movw 0x40e, %0" : "=r"(seg));
     uint32_t ebda=(uint32_t)seg<<4;
@@ -32,7 +40,8 @@ static const uint8_t *rsdp(void) {
         uint32_t end=area==0?ebda+1024:0x100000;
         if(!start||end>0x100000) continue;
         for(uint32_t a=start;a+20<=end;a+=16) {
-            const uint8_t *p=(const uint8_t *)(uintptr_t)a;
+            const uint8_t *p=(const uint8_t *)memory_phys_ptr(a);
+            if(!p)continue;
             if(eq(p,"RSD PTR ",8)&&checksum(p,20)) return p;
         }
     }
@@ -61,9 +70,9 @@ static const uint8_t *find_fadt(void) {
     const uint8_t *r=rsdp();
     if(!r) { console_write("ACPI: RSDP not found\n"); return NULL; }
     console_write("ACPI: RSDP found\n");
-    if(r[15]>=2 && range((uintptr_t)r,36)) {
+    if(r[15]>=2) {
         uint32_t len=rd32(r+20);
-        if(len>=36&&len<=4096&&range((uintptr_t)r,len)&&checksum(r,len)) {
+        if(len>=36&&len<=4096&&checksum(r,len)) {
             const uint8_t *f=fadt_in_root(rd64(r+24),8,"XSDT");
             if(f) { console_write("ACPI: FADT found via XSDT\n"); return f; }
             console_write("ACPI: XSDT lookup failed, trying RSDT\n");

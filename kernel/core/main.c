@@ -16,6 +16,7 @@
 #include <kilons/block.h>
 #include <kilons/ata_pio.h>
 #include <kilons/boot_module.h>
+#include <kilons/limine.h>
 static void print_number(uint64_t n) {
     char buf[21]; unsigned i = sizeof(buf)-1; buf[i]=0;
     do { buf[--i]=(char)('0'+n%10); n/=10; } while (n);
@@ -24,11 +25,17 @@ static void print_number(uint64_t n) {
 static void halt(void) { for (;;) __asm__ volatile ("cli; hlt"); }
 static void worker_a(void) { for (;;) { thread_sleep(10); } }
 static void worker_b(void) { for (;;) { thread_sleep(25); } }
-void kernel_main(uint32_t multiboot_info_phys) {
-    serial_init(); console_init();
+void kernel_main(void) {
+    /* Limine's entry page tables do not guarantee the legacy VGA identity
+     * mapping.  Start with serial-only logging; console_init() is called
+     * after vm_init() has rebuilt the bounded low identity window. */
+    serial_init();
     console_write("kilons " KILONS_VERSION_STRING ": amd64 long mode entered\n");
-    if (!memory_init(multiboot_info_phys)) {
-        console_write("kilons: ERROR invalid Multiboot2 memory map\n"); halt();
+    struct limine_boot_info boot;
+    if (!limine_boot_info(&boot) ||
+        !memory_init(boot.memmap, limine_modules(), boot.kernel_phys_start,
+                     boot.kernel_phys_end, boot.hhdm_offset)) {
+        console_write("kilons: ERROR invalid Limine memory map\n"); halt();
     }
     uint32_t before = memory_free_pages();
     console_write("kilons: usable free 4KiB frames: "); print_number(before); console_write("\n");
@@ -44,6 +51,7 @@ void kernel_main(uint32_t multiboot_info_phys) {
     tss_init();
     console_write("kilons: GDT/TSS and IST initialized\n");
     if (!vm_init()) { console_write("kilons: ERROR VM init\n"); halt(); }
+    console_init();
     uint64_t frame=page_alloc();
     if (!frame || !vm_map(VM_TEST_BASE,frame,VM_WRITABLE) || vm_translate(VM_TEST_BASE)!=frame) {
         console_write("kilons: ERROR VM map test\n"); halt();
@@ -83,9 +91,9 @@ void kernel_main(uint32_t multiboot_info_phys) {
     ramfs_init();
     vfs_init();
     console_write("kilons: experimental RAMFS initialized (volatile memory only)\n");
-    /* The GRUB module lives in reserved, identity-mapped physical memory.
-     * Expose it as a read-only block device, never copy or write it. */
-    int iso_rootfs=boot_module_register_rootfs(multiboot_info_phys);
+    /* Limine's named module is already mapped through the HHDM. Expose it as
+     * a read-only block device, never copy or write it. */
+    int iso_rootfs=boot_module_register_rootfs();
     if(iso_rootfs>=0){
         if(vfs_mkdir("/mnt/disk")==0 && vfs_mount_kilofs("/mnt/disk",iso_rootfs,0)==0)
             console_write("kilons: ISO rootfs module mounted read-only at /mnt/disk\n");

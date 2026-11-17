@@ -160,6 +160,18 @@ static void reset(struct kilofs *fs,struct kfs_device dev){
     for(unsigned i=0;i<KFS_CACHE_SLOTS;i++){fs->cache[i].valid=0;fs->cache[i].dirty=0;}
     for(unsigned i=0;i<KFS_HANDLES;i++)fs->handles[i].used=0;
 }
+/* Resetting a live instance would silently discard open-handle state and any
+ * write-back data that has not reached the device yet.  Mount and format are
+ * both destructive resets of the in-memory view, so refuse them until the
+ * caller has closed handles and made dirty cache state durable. */
+static int reset_busy(const struct kilofs *fs){
+    if(!fs||!fs->mounted)return 0;
+    for(unsigned i=0;i<KFS_HANDLES;i++)
+        if(fs->handles[i].used)return -K_EBUSY;
+    for(unsigned i=0;i<KFS_CACHE_SLOTS;i++)
+        if(fs->cache[i].valid&&fs->cache[i].dirty)return -K_EBUSY;
+    return 0;
+}
 static int valid_device(struct kfs_device d,int write){
     if(!d.read||!d.flush||d.total_blocks<KFS_DATA_START+1||d.total_blocks>KFS_MAX_BLOCKS)return -K_EINVAL;
     if(write&&!d.write)return -K_EROFS;
@@ -168,6 +180,7 @@ static int valid_device(struct kfs_device d,int write){
 int kfs_format(struct kilofs *fs,struct kfs_device dev){
     if(!fs)return -K_EINVAL;
     int rc=valid_device(dev,1);if(rc<0)return rc;
+    rc=reset_busy(fs);if(rc<0)return rc;
     reset(fs,dev);
     /* A new image must not begin with a stale transaction marker. */
     kfs_zero(fs->scratch,KFS_BLOCK);
@@ -199,6 +212,7 @@ int kfs_format(struct kilofs *fs,struct kfs_device dev){
 int kfs_mount(struct kilofs *fs,struct kfs_device dev,int readonly){
     if(!fs)return -K_EINVAL;
     int rc=valid_device(dev,!readonly);if(rc<0)return rc;
+    rc=reset_busy(fs);if(rc<0)return rc;
     reset(fs,dev);fs->readonly=!!readonly;
     rc=kfs_journal_recover(fs);if(rc<0)return rc;
     rc=kfs_cache_read(fs,0,fs->scratch);if(rc<0)return rc;

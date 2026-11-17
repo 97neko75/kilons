@@ -3,7 +3,14 @@
 #include <stdint.h>
 #include <stdbool.h>
 #define PAGE_SIZE 4096ULL
-bool memory_init(uint32_t mbi_phys);
+struct limine_memmap_response;
+struct limine_module_response;
+bool memory_init(const struct limine_memmap_response *memmap,
+                 const struct limine_module_response *modules,
+                 uint64_t kernel_phys_start, uint64_t kernel_phys_end,
+                 uint64_t hhdm_offset);
+uint64_t memory_hhdm_offset(void);
+void *memory_phys_ptr(uint64_t phys);
 uint64_t page_alloc(void); /* physical address, zero on failure */
 bool page_free(uint64_t phys);
 /* Single-owner VM mapping claims. A mapped frame cannot be freed or mapped

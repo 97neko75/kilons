@@ -1,8 +1,7 @@
 #!/bin/sh
-# Optional runtime smoke test on hosts with QEMU + grub-mkrescue installed.
+# Optional runtime smoke test on hosts with QEMU and Limine ISO tooling.
 set -eu
 command -v qemu-system-x86_64 >/dev/null || { echo 'SKIP: no QEMU installed' >&2; exit 77; }
-command -v grub-mkrescue >/dev/null || { echo 'SKIP: no GRUB ISO tooling' >&2; exit 77; }
 make iso >/dev/null
 log="${TMPDIR:-/tmp}/kilons-qemu-$$.log"
 trap 'rm -f "$log"' EXIT HUP INT TERM

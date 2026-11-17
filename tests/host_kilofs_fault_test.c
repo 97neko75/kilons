@@ -39,6 +39,9 @@ int main(void){
     assert(kfs_format(&fs,dev)==0);
     int fd=kfs_open(&fs,"atomic",KFS_READ|KFS_WRITE,1,0644);assert(fd>=0);
     assert(kfs_write(&fs,fd,"persist",7)==7);
+    /* A live handle or dirty write-back cache must not be lost by a reset. */
+    assert(kfs_mount(&fs,dev,0)==-K_EBUSY);
+    assert(kfs_format(&fs,dev)==-K_EBUSY);
     fail_writes=1;
     assert(kfs_sync(&fs)==-K_EIO);
     fail_writes=0;
@@ -50,10 +53,12 @@ int main(void){
     char b[10]={0};assert(kfs_read(&fs,fd,b,7)==7 && !memcmp(b,"persist",7));
     assert(kfs_close(&fs,fd)==0);
     /* A prepared record without a commit marker is discarded on reset. */
-    fd=kfs_open(&fs,"pending",KFS_WRITE,1,0644);assert(fd>=0);
-    assert(kfs_write(&fs,fd,"uncertain",9)==9);
+    struct kilofs pending_fs={0};
+    assert(kfs_mount(&pending_fs,dev,0)==0);
+    fd=kfs_open(&pending_fs,"pending",KFS_WRITE,1,0644);assert(fd>=0);
+    assert(kfs_write(&pending_fs,fd,"uncertain",9)==9);
     fail_after_prepared=1;prepared_seen=0;committed_seen=0;
-    assert(kfs_sync(&fs)==-K_EIO && prepared_seen);
+    assert(kfs_sync(&pending_fs)==-K_EIO && prepared_seen);
     fail_after_prepared=0;
     struct kilofs recovered={0};
     assert(kfs_mount(&recovered,dev,0)==0);
@@ -82,15 +87,17 @@ int main(void){
     struct kilofs damaged={0};
     assert(kfs_mount(&damaged,dev,0)==-K_EIO);
     medium[KFS_JOURNAL_START+1][0]^=0x5aU;
-    assert(kfs_mount(&after,dev,0)==0);
-    fd=kfs_open(&after,"checksum",KFS_READ,0,0);assert(fd>=0);
-    memset(b,0,sizeof b);assert(kfs_read(&after,fd,b,8)==8&&!memcmp(b,"verified",8));
-    assert(kfs_close(&after,fd)==0);
+    struct kilofs checksum_recovered={0};
+    assert(kfs_mount(&checksum_recovered,dev,0)==0);
+    fd=kfs_open(&checksum_recovered,"checksum",KFS_READ,0,0);assert(fd>=0);
+    memset(b,0,sizeof b);assert(kfs_read(&checksum_recovered,fd,b,8)==8&&!memcmp(b,"verified",8));
+    assert(kfs_close(&checksum_recovered,fd)==0);
     /* A metadata bitmap mismatch is an error even if a file still opens. */
     medium[1][0]^=0x80U;
-    assert(kfs_mount(&after,dev,1)==0);
-    assert(kfs_fsck(&after,&errors)==0 && errors>0);
-    assert(kfs_fsck_repair(&after,&errors)==-K_EROFS);
+    struct kilofs checksum_ro={0};
+    assert(kfs_mount(&checksum_ro,dev,1)==0);
+    assert(kfs_fsck(&checksum_ro,&errors)==0 && errors>0);
+    assert(kfs_fsck_repair(&checksum_ro,&errors)==-K_EROFS);
     struct kilofs repaired={0};
     assert(kfs_mount(&repaired,dev,0)==0);
     assert(kfs_fsck_repair(&repaired,&errors)==0&&errors==0);
@@ -109,6 +116,7 @@ int main(void){
     /* Separate tiny newly formatted volume to test deterministic ENOSPC. */
     struct kfs_device tiny=dev;
     tiny.total_blocks=KFS_DATA_START+1;
+    assert(kfs_sync(&fs)==0);
     assert(kfs_format(&fs,tiny)==0);
     fd=kfs_open(&fs,"full",KFS_WRITE,1,0644);assert(fd>=0);
     char chunk[KFS_BLOCK]={0};

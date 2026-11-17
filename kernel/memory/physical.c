@@ -2,30 +2,22 @@
 #include <stdbool.h>
 #include <stddef.h>
 #include <kilons/memory.h>
+#include <kilons/limine.h>
 #include <kilons/irq_guard.h>
 
 /* The bootstrap identity maps only [0, 1 GiB). No frames above it are used. */
 #define LIMIT (1ULL << 30)
 #define FRAMES (LIMIT / PAGE_SIZE)
 #define BITMAP_BYTES (FRAMES / 8)
-#define MULTIBOOT_MMAP 6U
-#define MULTIBOOT_MODULE 3U
-#define MULTIBOOT_END 0U
-#define MULTIBOOT_MAX_SIZE (16U * 1024U * 1024U)
 
-extern char __kernel_end[];
 static uint8_t usable[BITMAP_BYTES];
 static uint8_t allocated[BITMAP_BYTES];
 static uint8_t mapped[BITMAP_BYTES];
 static uint32_t free_count;
 static uint32_t next_frame = 1;
 static bool initialized;
+static uint64_t hhdm;
 
-static uint32_t u32(const uint8_t *p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
-}
-static uint64_t u64(const uint8_t *p) { return (uint64_t)u32(p) | ((uint64_t)u32(p + 4) << 32); }
 static bool bit(const uint8_t *b, uint32_t i) { return (b[i >> 3] & (1U << (i & 7))) != 0; }
 static void set(uint8_t *b, uint32_t i) { b[i >> 3] |= (uint8_t)(1U << (i & 7)); }
 static void clear(uint8_t *b, uint32_t i) { b[i >> 3] &= (uint8_t)~(1U << (i & 7)); }
@@ -53,74 +45,60 @@ static void mark_reserved(uint64_t start, uint64_t length) {
         clear(usable, (uint32_t)(addr / PAGE_SIZE));
 }
 
-bool memory_init(uint32_t mbi_phys) {
+bool memory_init(const struct limine_memmap_response *memmap,
+                 const struct limine_module_response *modules,
+                 uint64_t kernel_phys_start, uint64_t kernel_phys_end,
+                 uint64_t hhdm_offset) {
     initialized = false;
+    hhdm = hhdm_offset;
     free_count = 0;
     next_frame = 1;
     for (size_t i = 0; i < BITMAP_BYTES; ++i) {
         usable[i] = 0; allocated[i] = 0; mapped[i] = 0;
     }
-    if ((mbi_phys & 7U) || mbi_phys < 4096 || mbi_phys >= LIMIT - 8) return false;
-    const uint8_t *mbi = (const uint8_t *)(uintptr_t)mbi_phys;
-    uint32_t total = u32(mbi);
-    if (total < 16 || total > MULTIBOOT_MAX_SIZE || (uint64_t)mbi_phys + total > LIMIT) return false;
-    bool found_map = false, found_end = false;
-    uint32_t off = 8;
-    while (off <= total - 8) {
-        const uint8_t *tag = mbi + off;
-        uint32_t type = u32(tag), size = u32(tag + 4);
-        if (size < 8 || size > total - off) return false;
-        if (type == MULTIBOOT_END) { if (size != 8) return false; found_end = true; break; }
-        if (type == MULTIBOOT_MMAP) {
-            if (size < 16) return false;
-            uint32_t entry_size = u32(tag + 8);
-            if (entry_size < 24 || (size - 16) % entry_size) return false;
-            found_map = true;
-            for (uint32_t pos = 16; pos < size; pos += entry_size) {
-                const uint8_t *e = tag + pos;
-                if (u32(e + 16) == 1) mark_available(u64(e), u64(e + 8));
-            }
-        }
-        uint32_t advance = (size + 7U) & ~7U;
-        if (advance > total - off) return false;
-        off += advance;
+    if (!memmap || !memmap->entries || !memmap->entry_count ||
+        memmap->entry_count > 4096 || kernel_phys_end < kernel_phys_start) {
+        return false;
     }
-    if (!found_map || !found_end) return false;
-    /* Multiboot memory map can contain overlapping reserved and usable ranges.
-       A second pass makes reserved entries override available entries. */
-    off = 8;
-    while (off <= total - 8) {
-        const uint8_t *tag = mbi + off;
-        uint32_t type = u32(tag), size = u32(tag + 4);
-        if (type == MULTIBOOT_END) break;
-        if (type == MULTIBOOT_MODULE) {
-            if (size < 16) return false;
-            uint32_t start = u32(tag + 8), end = u32(tag + 12);
-            if (end < start) return false;
-            mark_reserved(start, (uint64_t)end - start);
-        }
-        if (type == MULTIBOOT_MMAP) {
-            uint32_t entry_size = u32(tag + 8);
-            for (uint32_t pos = 16; pos < size; pos += entry_size) {
-                const uint8_t *e = tag + pos;
-                if (u32(e + 16) != 1) mark_reserved(u64(e), u64(e + 8));
-            }
-        }
-        off += (size + 7U) & ~7U;
+    /* Limine supplies a flat array of entries.  First collect usable ranges,
+     * then apply every non-usable range so overlaps fail closed. */
+    for (uint64_t i = 0; i < memmap->entry_count; ++i) {
+        const struct limine_memmap_entry *entry = memmap->entries[i];
+        if (!entry || !entry->length ||
+            entry->base > UINT64_MAX - entry->length) return false;
+        if (entry->type == LIMINE_MEMMAP_USABLE)
+            mark_available(entry->base, entry->length);
     }
-    /* The kernel is loaded at 1 MiB and includes boot page tables, stack,
-       and allocator metadata in BSS. Keep all low memory unavailable. */
-#ifdef KILONS_HOST_TEST
-    /* Hosted addresses are typically above 1 GiB; reserve synthetic low
-     * boot memory rather than the host process's __kernel_end address. */
-    mark_reserved(0, 2ULL * 1024 * 1024);
-#else
-    mark_reserved(0, (uint64_t)(uintptr_t)__kernel_end);
-#endif
-    mark_reserved(mbi_phys, total);
+    for (uint64_t i = 0; i < memmap->entry_count; ++i) {
+        const struct limine_memmap_entry *entry = memmap->entries[i];
+        if (entry->type != LIMINE_MEMMAP_USABLE)
+            mark_reserved(entry->base, entry->length);
+    }
+    if (kernel_phys_end > kernel_phys_start)
+        mark_reserved(kernel_phys_start, kernel_phys_end - kernel_phys_start);
+    if (modules) {
+        if (modules->module_count > 1024 ||
+            (modules->module_count && !modules->modules)) return false;
+        for (uint64_t i = 0; i < modules->module_count; ++i) {
+            const struct limine_file *module = modules->modules[i];
+            if (!module || !module->address || !module->size) return false;
+            uint64_t address = (uint64_t)(uintptr_t)module->address;
+            if (address < hhdm) return false;
+            mark_reserved(address - hhdm, module->size);
+        }
+    }
+    /* Keep the zero page unavailable even if firmware reports it as usable. */
+    mark_reserved(0, PAGE_SIZE);
     for (uint32_t i = 1; i < FRAMES; ++i) if (bit(usable, i)) ++free_count;
     initialized = true;
     return true;
+}
+
+uint64_t memory_hhdm_offset(void) { return hhdm; }
+
+void *memory_phys_ptr(uint64_t phys) {
+    if (phys > UINT64_MAX - hhdm) return NULL;
+    return (void *)(uintptr_t)(phys + hhdm);
 }
 /* Interrupt-safe on one CPU. The scan cursor avoids repeatedly walking low
  * allocated memory; on wrap every usable frame is still considered. */

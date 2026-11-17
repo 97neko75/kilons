@@ -1,4 +1,4 @@
-/* v0.3.4 VFS pathname/permissions/lseek/cache + MBR FAT32 integration.
+/* v0.4.0-2 VFS pathname/permissions/lseek/cache + MBR FAT32 integration.
  * Synthetic disk is a host memory callback; no physical drive is written. */
 #include <kilons/vfs.h>
 #include <kilons/ramfs.h>
@@ -155,6 +155,6 @@ int main(void){
     assert(vfs_access("/mnt/disk/HELLO.TXT",2)==-1 && vfs_errno()==K_EROFS);
     assert(vfs_unlink("/mnt/disk/HELLO.TXT")==-1 && vfs_errno()==K_EROFS);
     assert(vfs_rmdir("/mnt/disk")==-1);
-    puts("v0.3.4 pathname/inode/dentry/permissions/lseek/MBR/read-only FAT32 PASS");
+    puts("v0.4.0-2 pathname/inode/dentry/permissions/lseek/MBR/read-only FAT32 PASS");
     return 0;
 }
