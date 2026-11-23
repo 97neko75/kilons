@@ -52,6 +52,40 @@ static int file_check(int dir) {
     if(fchmod(fd,0600)<0 || fstat(fd,&info)<0 || (info.st_mode&0777)!=0600)ok=0;
     return close(fd)==0 && ok;
 }
+/* Exercise CWD pins and directory descriptor lifetime through the actual
+ * Ring 3 syscall ABI. Renaming the current directory is allowed and updates
+ * getcwd; removing or replacing it stays busy until the process leaves it. */
+static int cwd_lifetime_check(int rootfd,const char *root) {
+    int cwd=-1,replacement=-1,ok=0;
+    char path[128];
+    struct stat info;
+    if(mkdirat(rootfd,"cwd",0700)<0)goto out;
+    if(mkdirat(rootfd,"replacement",0700)<0)goto out;
+    cwd=openat(rootfd,"cwd",O_RDONLY|O_DIRECTORY);
+    replacement=openat(rootfd,"replacement",O_RDONLY|O_DIRECTORY);
+    if(cwd<0 || replacement<0 || fchdir(cwd)<0)goto out;
+    if(!getcwd(path,sizeof path) || !equal(path,"/tmp/posixcheck.run/cwd"))goto out;
+    errno=0;
+    if(unlinkat(rootfd,"cwd",AT_REMOVEDIR)==0 || errno!=EBUSY)goto out;
+    errno=0;
+    if(renameat(rootfd,"replacement",rootfd,"cwd")==0 || errno!=EBUSY)goto out;
+    if(renameat(rootfd,"cwd",rootfd,"renamed")<0)goto out;
+    if(!getcwd(path,sizeof path) || !equal(path,"/tmp/posixcheck.run/renamed"))goto out;
+    errno=0;
+    if(unlinkat(rootfd,"renamed",AT_REMOVEDIR)==0 || errno!=EBUSY)goto out;
+    if(fchdir(rootfd)<0 || renameat(rootfd,"replacement",rootfd,"renamed")<0)goto out;
+    if(fstat(cwd,&info)<0 || info.st_nlink!=0)goto out;
+    if(!getcwd(path,sizeof path) || !equal(path,root))goto out;
+    ok=1;
+out:
+    (void)fchdir(rootfd);
+    if(cwd>=0 && close(cwd)<0)ok=0;
+    if(replacement>=0 && close(replacement)<0)ok=0;
+    if(unlinkat(rootfd,"cwd",AT_REMOVEDIR)<0 && errno!=ENOENT)ok=0;
+    if(unlinkat(rootfd,"replacement",AT_REMOVEDIR)<0 && errno!=ENOENT)ok=0;
+    if(unlinkat(rootfd,"renamed",AT_REMOVEDIR)<0 && errno!=ENOENT)ok=0;
+    return ok;
+}
 static int group_check(void) {
     int gate[2];
     if(pipe2(gate,O_CLOEXEC)<0)return 0;
@@ -114,6 +148,7 @@ int main(void) {
     int dir=open(root,O_DIRECTORY|O_RDONLY);
     char cwd[64];
     int ok=dir>=0 && fchdir(dir)==0 && file_check(dir) &&
+           getcwd(cwd,sizeof cwd) && equal(cwd,root) && cwd_lifetime_check(dir,root) &&
            getcwd(cwd,sizeof cwd) && equal(cwd,root) && group_check() && stop_check() && exec_check();
     if(dir>=0)close(dir);
     if(chdir("/")<0 || rmdir(root)<0)ok=0;

@@ -3,8 +3,11 @@
 #include <errno.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
+#include <sched.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <stdint.h>
 /* Run from an isolated process: waitpid(-1) only observes this test's children. */
 static int start(char *name){
     int pid=fork();
@@ -143,6 +146,167 @@ static int vfork_check(void) {
     int exit_status;
     if(child<0 || waitpid(child,&exit_status,0)!=child ||
        !WIFEXITED(exit_status) || WEXITSTATUS(exit_status)!=34)return 0;
+    volatile unsigned marker=0x97531U;
+    child=vfork();
+    if(child==0) {
+        char *args[]={"missing",0};
+        char *env[]={0};
+        if(execve("/kilons-vfork-exec-missing",args,env)!=-1 || errno!=ENOENT)
+            _exit(35);
+        _exit(36);
+    }
+    if(child<0 || marker!=0x97531U || waitpid(child,&exit_status,0)!=child ||
+       !WIFEXITED(exit_status) || WEXITSTATUS(exit_status)!=36)return 0;
+    return 1;
+}
+
+static int wait_boundary_check(void) {
+    int gate[2];
+    if(pipe(gate)<0)return 0;
+    int child=fork();
+    if(child==0) {
+        close(gate[1]);
+        char byte=0;
+        if(read(gate[0],&byte,1)!=1 || byte!='W')_exit(41);
+        close(gate[0]);
+        _exit(29);
+    }
+    close(gate[0]);
+    if(child<0) {close(gate[1]);return 0;}
+    int status=0;
+    if(waitpid(child,&status,WNOHANG)!=0 ||
+       waitpid(child+1000,&status,WNOHANG)!=-1 || errno!=ECHILD ||
+       write(gate[1],"W",1)!=1) {
+        close(gate[1]);
+        return 0;
+    }
+    close(gate[1]);
+    if(waitpid(child,&status,0)!=child || !WIFEXITED(status) || WEXITSTATUS(status)!=29)
+        return 0;
+    child=fork();
+    if(child==0)_exit(30);
+    if(child<0 || waitpid(child,0,0)!=child)return 0;
+    return waitpid(-1,&status,WNOHANG)==-1 && errno==ECHILD;
+}
+
+static int exec_failure_check(void) {
+    static const char invalid_image[]="/tmp/kregress-invalid-elf";
+    int channel[2];
+    if(pipe(channel)<0)return 0;
+    int child=fork();
+    if(child==0) {
+        close(channel[0]);
+        volatile unsigned marker=0x13579U;
+        volatile uintptr_t invalid_argv=0x40000000U;
+        char *args[]={"echo",0};
+        char *env[]={0};
+        unsigned char malformed[64]={0};
+        if(execve("/bin/echo",(char *const *)(uintptr_t)invalid_argv,env)!=-1 ||
+           errno!=EFAULT)_exit(51);
+        if(execve("/kilons-exec-missing",args,env)!=-1 || errno!=ENOENT)_exit(52);
+        int image=open(invalid_image,O_CREAT|O_EXCL|O_RDWR,0700);
+        if(image<0 || write(image,malformed,sizeof malformed)!=(ssize_t)sizeof malformed ||
+           close(image)<0)_exit(53);
+        /* This gets past path lookup and replacement-VM creation, then fails
+         * ELF validation. Repetition catches replacement-space leaks. */
+        for(unsigned i=0;i<16;i++)
+            if(execve(invalid_image,args,env)!=-1 || errno!=ENOEXEC)_exit(54);
+        if(unlink(invalid_image)<0)_exit(55);
+        if(marker!=0x13579U || write(channel[1],"E",1)!=1)_exit(53);
+        close(channel[1]);
+        _exit(0);
+    }
+    close(channel[1]);
+    if(child<0) {close(channel[0]);return 0;}
+    int ok=collect(child,0);
+    char byte=0;
+    ok=ok && read(channel[0],&byte,1)==1 && byte=='E' && read(channel[0],&byte,1)==0;
+    if(close(channel[0])<0)ok=0;
+    return ok;
+}
+
+static volatile sig_atomic_t inherited_signal_count;
+static void inherited_signal_handler(int sig) {
+    if(sig==SIGUSR1)inherited_signal_count++;
+}
+static int signal_fork_cleanup_check(void) {
+    struct sigaction action={0};
+    action.sa_handler=inherited_signal_handler;
+    if(sigaction(SIGUSR1,&action,0)<0)return 0;
+    int ok=1;
+    for(unsigned i=0;i<16 && ok;i++) {
+        inherited_signal_count=0;
+        int child=fork();
+        if(child==0) {
+            if(inherited_signal_count || raise(SIGUSR1)<0 || inherited_signal_count!=1)
+                _exit(61);
+            _exit(0);
+        }
+        ok=child>0 && collect(child,0) && inherited_signal_count==0;
+    }
+    action.sa_handler=SIG_DFL;
+    if(sigaction(SIGUSR1,&action,0)<0)ok=0;
+    return ok;
+}
+
+static int orphan_reparent_check(void) {
+    int channel[2];
+    if(pipe(channel)<0)return 0;
+    int parent=fork();
+    if(parent==0) {
+        close(channel[0]);
+        int orphan=fork();
+        if(orphan==0) {
+            char result='X';
+            for(unsigned i=0;i<2048;i++) {
+                if(getppid()==1) {result='O';break;}
+                (void)sched_yield();
+            }
+            (void)write(channel[1],&result,1);
+            close(channel[1]);
+            _exit(result=='O'?0:71);
+        }
+        close(channel[1]);
+        _exit(orphan>0?0:72);
+    }
+    close(channel[1]);
+    if(parent<0) {close(channel[0]);return 0;}
+    int ok=collect(parent,0);
+    char result=0;
+    ok=ok && read(channel[0],&result,1)==1 && result=='O' && read(channel[0],&result,1)==0;
+    if(close(channel[0])<0)ok=0;
+    return ok;
+}
+
+static int fork_memory_stress(unsigned rounds) {
+    const size_t page=4096;
+    for(unsigned round=0;round<rounds;round++) {
+        volatile unsigned char *memory=mmap(0,8*page,PROT_READ|PROT_WRITE,
+                                            MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+        if(memory==MAP_FAILED)return 0;
+        for(unsigned i=0;i<8;i++)memory[i*page]=(unsigned char)(round+i+1);
+        int child=fork();
+        if(child==0) {
+            for(unsigned i=0;i<8;i++)if(memory[i*page]!=(unsigned char)(round+i+1))_exit(81);
+            memory[0]^=0xff;
+            if(mprotect((void *)memory,page,PROT_READ)<0 ||
+               mprotect((void *)memory,page,PROT_READ|PROT_WRITE)<0 ||
+               munmap((void *)(memory+3*page),page)<0)_exit(82);
+            void *hole=mmap(0,page,PROT_READ|PROT_WRITE,
+                            MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+            if(hole!=(void *)(memory+3*page))_exit(83);
+            *(volatile unsigned char *)hole=0xa5;
+            if(munmap((void *)memory,8*page)<0)_exit(84);
+            _exit(0);
+        }
+        int status=0;
+        int ok=child>0 && waitpid(child,&status,0)==child &&
+               WIFEXITED(status) && WEXITSTATUS(status)==0;
+        for(unsigned i=0;i<8 && ok;i++)
+            if(memory[i*page]!=(unsigned char)(round+i+1))ok=0;
+        if(munmap((void *)memory,8*page)<0)ok=0;
+        if(!ok)return 0;
+    }
     return 1;
 }
 int main(int argc,char **argv){
@@ -155,6 +319,18 @@ int main(int argc,char **argv){
     if(argc!=1)return 2;
     int stress_only=same(mode,"stress");
     int integration_only=same(mode,"test19");
+    if(stress_only) {
+        if(!wait_boundary_check() || !exec_failure_check() ||
+           !signal_fork_cleanup_check() || !orphan_reparent_check() ||
+           !fork_memory_stress(256)) {
+            static const char message[]="kregress: process/memory stress FAIL\n";
+            write(2,message,sizeof message-1);
+            return 1;
+        }
+        static const char message[]="kregress: process/memory stress PASS\n";
+        write(1,message,sizeof message-1);
+        return 0;
+    }
     char *images[]={"forkprobe","execprobe","mapprobe","signalprobe","posix_example","fault","ud","divide"};
     int signals[]={0,0,0,0,0,SIGSEGV,SIGILL,SIGFPE};
     for(unsigned i=0;!stress_only && i<(integration_only?5:sizeof images/sizeof images[0]);i++){
@@ -194,10 +370,19 @@ int main(int argc,char **argv){
         return 1;
     }
     if(!stress_only && (!vfork_check() || !fd_exec_check()))return 1;
+    if(!wait_boundary_check() || !exec_failure_check() ||
+       !signal_fork_cleanup_check() || !orphan_reparent_check() ||
+       !fork_memory_stress(64)) {
+        static const char message[]="kregress: process/memory lifecycle FAIL\n";
+        write(2,message,sizeof message-1);
+        return 1;
+    }
     if(!stress_only && !pipeline_check()){
         write(2,"pipeline/redirection failed\n",28);return 1;
     }
     int status;
     if(waitpid(-1,&status,WNOHANG)!=-1 || errno!=ECHILD)return 1;
+    static const char lifecycle[]="kregress: process/memory lifecycle PASS\n";
+    write(1,lifecycle,sizeof lifecycle-1);
     write(1,"kregress: PASS\n",15);return 0;
 }

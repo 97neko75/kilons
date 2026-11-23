@@ -220,12 +220,17 @@ static void relative_io_test(void) {
     assert(call(5,fd,(long)&st,0)==0 && (st.st_mode&0777)==0620);
     int second_dir=(int)posix_openat(base,(long)"moved",O_DIRECTORY,0);
     assert(second_dir>=0 && call(91,dir,0710,0)==0);
-    assert(call(263,base,(long)"moved",0x200)==0);
+    assert(call(263,base,(long)"moved",AT_REMOVEDIR)==-K_EBUSY);
+    assert(call(258,base,(long)"replacement",0700)==0);
+    assert(posix_renameat(base,(long)"replacement",base,(long)"moved")==-K_EBUSY);
+    assert(call(263,base,(long)"replacement",AT_REMOVEDIR)==0);
+    assert(call(81,base,0,0)==0);
+    assert(call(263,base,(long)"moved",AT_REMOVEDIR)==0);
     assert(call(5,second_dir,(long)&st,sizeof st)==0 && (st.st_mode&0777)==0710 && !st.st_nlink);
     assert(call(91,dir,0701,0)==0);
     assert(call(5,second_dir,(long)&st,sizeof st)==0 && (st.st_mode&0777)==0701);
     assert(call(3,second_dir,0,0)==0);
-    assert(call(79,(long)buf,sizeof buf,0)==-2);
+    assert(call(79,(long)buf,sizeof buf,0)==(long)buf && !strcmp(buf,"/tmp"));
     assert(call(258,base,(long)"moved",0700)==0);
     assert(posix_openat(dir,(long)"stale",0100|2,0644)==-2);
     assert(call(81,base,0,0)==0 && call(263,base,(long)"moved",0x200)==0);
@@ -332,7 +337,9 @@ int main(void) {
     assert(call(72,fd_clone,1,0)==0); /* CLOEXEC not inherited by dup */
     assert(call(72,fd_clone,3,0)==(2|02000));
     assert(call(3,fd_clone,0,0)==0);
-    assert(call(72,fd,4,2)==0); /* F_SETFL clears O_APPEND */
+    assert(call(72,fd,F_SETFL,O_SYNC|02000|2)==0);
+    assert(call(72,fd,F_GETFL,0)==(O_SYNC|02000|2));
+    assert(call(72,fd,F_SETFL,2)==0); /* clear O_SYNC and O_APPEND */
     assert(call(72,fd,3,0)==2);
     assert(call(72,fd,4,02000|2)==0); /* restore append */
     assert(call(8,fd,0,0)==0);

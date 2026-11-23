@@ -1,7 +1,7 @@
 #include "internal.h"
-/* Bitmap changes and zeroing of a newly allocated data block are not
- * atomic across power loss; fsck is required after an unclean shutdown.
- * The caller holds the filesystem lock throughout each operation. */
+/* Bitmap changes and zeroing of a newly allocated data block are committed by
+ * the enclosing redo-journal sync; the caller remains inside the nested UP
+ * guard for the complete public operation. */
 static int bit_change(struct kilofs *fs,uint32_t bitmap_block,uint32_t bit,int value){
     int rc=kfs_cache_read(fs,bitmap_block,fs->scratch);if(rc<0)return rc;
     uint8_t mask=(uint8_t)(1U<<(bit%8));

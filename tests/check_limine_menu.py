@@ -5,18 +5,19 @@ from pathlib import Path
 def main():
     config = Path("boot/limine/limine.conf").read_text(encoding="utf-8")
     makefile = Path("Makefile").read_text(encoding="utf-8")
+    version = Path("VERSION").read_text(encoding="utf-8").strip()
     required = (
         "timeout: 5",
         "default_entry: 1",
-        "interface_branding: kilons 0.4.0-2",
-        "/kilons 0.4.0-2",
+        f"interface_branding: kilons {version}",
+        f"/kilons {version}",
         "protocol: limine",
         "path: boot():/boot/kilons/kernel.elf",
         "module_path: boot():/boot/kilons/rootfs.kilofs",
         "module_path: boot():/boot/kilons/initramfs.img",
         "module_string: rootfs",
-        "/Advanced options for kilons 0.4.0-2",
-        "//kilons 0.4.0-2 (initramfs)",
+        f"/Advanced options for kilons {version}",
+        f"//kilons {version} (initramfs)",
     )
     for item in required:
         assert item in config, item

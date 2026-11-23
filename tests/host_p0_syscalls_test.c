@@ -3,6 +3,7 @@
  * Actual hardware page-table behavior requires the QEMU guest tests. */
 #include <kilons/posix.h>
 #include "../include/dirent.h"
+#include "../include/fcntl_flags.h"
 #include <kilons/vfs.h>
 #include <kilons/ramfs.h>
 #include <kilons/process.h>
@@ -46,6 +47,60 @@ unsigned process_zombie_count(void){return 0;}
 uint32_t memory_free_pages(void){return 2048;}
 static long call(long nr,uint64_t a,uint64_t b,uint64_t c){return posix_dispatch((uint64_t)nr,a,b,c);}
 #define PTR(v) ((uint64_t)(uintptr_t)(v))
+
+/* Force the last VFS descriptor retain in posix_task_clone() to fail after
+ * earlier file, pipe and CWD references have been copied. */
+static void clone_failure_rollback_test(void) {
+    static const char directory[]="/tmp/clone-rollback";
+    static const char first_path[]="/tmp/clone-rollback/first";
+    static const char last_path[]="/tmp/clone-rollback/last";
+    static const char tmp[]="/tmp";
+    static const char first_name[]="first";
+    static const char last_name[]="last";
+    int ends[2]={-1,-1};
+    char byte='x';
+    reset_regions();
+    region(directory,sizeof directory,false);
+    region(first_path,sizeof first_path,false);
+    region(last_path,sizeof last_path,false);
+    region(tmp,sizeof tmp,false);
+    region(first_name,sizeof first_name,false);
+    region(last_name,sizeof last_name,false);
+    region(ends,sizeof ends,true);
+    region(&byte,sizeof byte,false);
+    assert(call(83,PTR(directory),0700,0)==0);
+    assert(call(80,PTR(directory),0,0)==0);
+    int first=(int)call(2,PTR(first_name),O_CREAT|O_EXCL|O_RDWR,0600);
+    assert(first>=3);
+    assert(call(22,PTR(ends),0,0)==0);
+    int last=(int)call(2,PTR(last_name),O_CREAT|O_EXCL|O_RDWR,0600);
+    assert(last>ends[1]);
+    int first_backend=posix_exec_backend(first);
+    int last_backend=posix_exec_backend(last);
+    assert(first_backend>=3 && last_backend>=3);
+
+    unsigned retained=0;
+    while(vfs_retain(last_backend)==0)retained++;
+    assert(retained==65534U);
+    assert(!posix_task_clone(1,2));
+    /* Earlier file, pipe and CWD references, and the task slot, roll back. */
+    assert(vfs_last_reference(first_backend));
+    for(unsigned i=0;i<retained;i++)assert(vfs_close(last_backend)==0);
+    assert(vfs_last_reference(last_backend));
+
+    assert(call(3,ends[0],0,0)==0);
+    assert(call(1,ends[1],PTR(&byte),1)==-32); /* no leaked clone reader */
+    assert(call(3,ends[1],0,0)==0);
+    assert(call(3,first,0,0)==0 && call(3,last,0,0)==0);
+    assert(call(80,PTR(tmp),0,0)==0);
+    assert(call(87,PTR(first_path),0,0)==0);
+    assert(call(87,PTR(last_path),0,0)==0);
+    assert(call(84,PTR(directory),0,0)==0); /* no leaked clone CWD ref */
+    assert(posix_task_begin(2)); /* failed clone left its slot reusable */
+    posix_task_discard(2);
+    posix_task_activate(1);
+}
+
 int main(void) {
     ramfs_init();vfs_init();posix_task_begin(1);
     reset_regions();
@@ -247,6 +302,7 @@ int main(void) {
     assert(call(0,directory,PTR(output+1),sizeof copied)==0);
     assert(call(3,directory,0,0)==0);
     assert(call(87,PTR(path),0,0)==0);
+    clone_failure_rollback_test();
     posix_task_end();
     /* A full process-I/O table must report exhaustion explicitly, then
      * become reusable after exit/discard. */
@@ -255,6 +311,6 @@ int main(void) {
     for(uint32_t pid=3;pid<15;pid++)posix_task_discard(pid);
     assert(posix_task_begin(15));
     posix_task_end();
-    puts("P0 syscall crossing-pages / partial I-O / FD rollback / cloexec PASS");
+    puts("P0 syscall crossing-pages / partial I-O / FD + fork rollback / cloexec PASS");
     return 0;
 }

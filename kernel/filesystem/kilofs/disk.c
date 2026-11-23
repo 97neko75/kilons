@@ -1,9 +1,9 @@
 #include "internal.h"
 
-/* Write-back cache and a small redo journal. Every caller must serialize all
- * kilofs operations with the filesystem mutex. The journal is deliberately
- * block based: a sync either leaves the old home blocks intact, or leaves a
- * committed record that mount can replay after a reset. */
+/* Write-back cache and a small redo journal. Public entry points serialize
+ * operations with the nested UP guard in internal.h. The journal is
+ * deliberately block based: a sync either leaves the old home blocks intact,
+ * or leaves a committed record that mount can replay after a reset. */
 static int slot_for(struct kilofs *fs,uint32_t block,unsigned *out){
     if(block>=fs->dev.total_blocks)return -K_EINVAL;
     for(unsigned i=0;i<KFS_CACHE_SLOTS;i++)
@@ -46,11 +46,13 @@ static uint32_t header_checksum(const uint8_t *header){
     return hash;
 }
 int kfs_cache_read(struct kilofs *fs,uint32_t block,uint8_t *dst){
+    KFS_GUARD(fs);
     if(!fs||!dst||!fs->dev.read)return -K_EINVAL;
     unsigned i;int rc=slot_for(fs,block,&i);if(rc<0)return rc;
     kfs_copy(dst,fs->cache[i].data,KFS_BLOCK);return 0;
 }
 int kfs_cache_write(struct kilofs *fs,uint32_t block,const uint8_t *src){
+    KFS_GUARD(fs);
     if(!fs||!src||!fs->dev.write||fs->readonly)return -K_EROFS;
     unsigned i;int rc=slot_for(fs,block,&i);if(rc<0)return rc;
     kfs_copy(fs->cache[i].data,src,KFS_BLOCK);fs->cache[i].dirty=1;return 0;
@@ -81,6 +83,7 @@ static int clear_journal(struct kilofs *fs){
 /* Replay a committed transaction. Prepared records are intentionally
  * discarded: home blocks were not made visible before the commit marker. */
 int kfs_journal_recover(struct kilofs *fs){
+    KFS_GUARD(fs);
     if(!fs||!fs->dev.read||!fs->dev.flush)return -K_EINVAL;
     int rc=fs->dev.read(fs->dev.context,fs->journal_start,fs->scratch);
     if(rc<0)return rc;
@@ -138,6 +141,7 @@ static int journal_commit(struct kilofs *fs,const unsigned *slots,unsigned count
 }
 
 int kfs_cache_flush(struct kilofs *fs){
+    KFS_GUARD(fs);
     if(!fs||!fs->dev.write||!fs->dev.flush)return -K_EINVAL;
     int rc=kfs_journal_recover(fs);if(rc<0)return rc;
     unsigned slots[KFS_JOURNAL_MAX_RECORDS],count=0;
@@ -149,6 +153,7 @@ int kfs_cache_flush(struct kilofs *fs){
     return journal_commit(fs,slots,count);
 }
 int kfs_sync(struct kilofs *fs){
+    KFS_GUARD(fs);
     if(!fs||!fs->mounted)return -K_EINVAL;
     return fs->readonly?0:kfs_cache_flush(fs);
 }
@@ -178,6 +183,7 @@ static int valid_device(struct kfs_device d,int write){
     return 0;
 }
 int kfs_format(struct kilofs *fs,struct kfs_device dev){
+    KFS_GUARD(fs);
     if(!fs)return -K_EINVAL;
     int rc=valid_device(dev,1);if(rc<0)return rc;
     rc=reset_busy(fs);if(rc<0)return rc;
@@ -210,6 +216,7 @@ int kfs_format(struct kilofs *fs,struct kfs_device dev){
     fs->mounted=1;return 0;
 }
 int kfs_mount(struct kilofs *fs,struct kfs_device dev,int readonly){
+    KFS_GUARD(fs);
     if(!fs)return -K_EINVAL;
     int rc=valid_device(dev,!readonly);if(rc<0)return rc;
     rc=reset_busy(fs);if(rc<0)return rc;

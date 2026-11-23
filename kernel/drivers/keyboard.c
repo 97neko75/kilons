@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <kilons/io.h>
 #include <kilons/keyboard.h>
+#include <kilons/irq_guard.h>
 /* Controller translation turns keyboard set 2 into the set 1 stream below. */
 enum {
     DATA = 0x60, STATUS = 0x64, COMMAND = 0x64,
@@ -105,7 +106,10 @@ static char decode(uint8_t sc) {
     }
     if (extended) { extended = 0; if (sc & 0x80) return 0; if (sc == 0x48) return 17; if (sc == 0x50) return 18; if (sc == 0x4b) return 19; if (sc == 0x4d) return 20; if (sc == 0x47) return 21; if (sc == 0x4f) return 22; if (sc == 0x53) return 23; return 0; }
     if ((sc & 0x7f) == 0x2a || (sc & 0x7f) == 0x36) {
-        shift = (sc & 0x80) ? 0 : 1; return 0;
+        unsigned bit = (sc & 0x7f) == 0x2a ? 1u : 2u;
+        if (sc & 0x80) shift &= ~bit;
+        else shift |= bit;
+        return 0;
     }
     if (sc == 0x3a) { caps ^= 1; return 0; }
     if (sc == 0xa0) {
@@ -121,7 +125,7 @@ static char decode(uint8_t sc) {
         }
     }
     char ch = normal[sc];
-    if (ch >= 'a' && ch <= 'z') { if (shift ^ caps) ch = (char)(ch - 'a' + 'A'); }
+    if (ch >= 'a' && ch <= 'z') { if (!!shift ^ caps) ch = (char)(ch - 'a' + 'A'); }
     else if (shift) {
         switch (ch) {
             case '1': ch='!'; break; case '2': ch='@'; break;
@@ -141,12 +145,13 @@ static char decode(uint8_t sc) {
     return ch;
 }
 
-/* Both callers use interrupt gates, so the producer cannot reenter on this UP kernel. */
+/* IRQ and dispatcher polling share this producer on the UP kernel. */
 #define KB_SIZE 128u
 static volatile unsigned head, tail;
 static char buffer[KB_SIZE];
 void keyboard_service(void) {
     if (!port_ready) return;
+    uint64_t flags = kilons_irq_save();
     /* Always consume pending hardware bytes, even if the software queue fills.
      * A stuck controller must not monopolize an interrupt handler. */
     for (unsigned count = 0; count < 16; ++count) {
@@ -165,6 +170,7 @@ void keyboard_service(void) {
         buffer[head] = ch;
         head = next;
     }
+    kilons_irq_restore(flags);
 }
 int keyboard_available(void){return tail!=head;}
 char keyboard_poll(void) {

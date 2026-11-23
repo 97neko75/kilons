@@ -19,7 +19,9 @@ static bool ready;
 /* Test-only CR3 and TLB stand-ins. Hosted page-table operations still use
  * the same creation, mapping, cloning and copy paths as the real kernel. */
 static uint64_t host_cr3;
+static uint64_t host_fail_phys_access;
 void vm_host_set_cr3(uint64_t phys) { host_cr3=phys; }
+void vm_host_fail_phys_access_for(uint64_t phys) { host_fail_phys_access=phys; }
 static uint64_t cr3(void) { return host_cr3; }
 static void flush(uint64_t va) { (void)va; }
 #else
@@ -28,6 +30,10 @@ static void flush(uint64_t va) { __asm__ volatile("invlpg (%0)" :: "r"(va) : "me
 #endif
 static void *phys_ptr(uint64_t pa) {
 #ifdef KILONS_HOST_TEST
+    if(pa && pa==host_fail_phys_access) {
+        host_fail_phys_access=0;
+        return NULL;
+    }
     return (void *)(uintptr_t)pa;
 #else
     return memory_phys_ptr(pa);
@@ -185,21 +191,32 @@ void vm_space_destroy(struct vm_space *space) {
     /* The owner ledger, rather than potentially corrupted PTE contents,
      * determines which physical frames this address space may release.
      * A damaged leaf can no longer free another process's page. */
+    uint64_t *pt=NULL;
+    if(space->pt && page_is_allocated(space->pt) && !page_is_mapped(space->pt))
+        pt=pt_phys(space->pt);
     for(unsigned i=0;i<USER_PAGES;i++) if(space->owned[i]) {
         uint64_t pa=space->owned[i];
-        if(space->pt)pt_phys(space->pt)[i]=0;
         space->owned[i]=0;
+        if(pt)pt[i]=0;
+        /* Do not free a paging structure if a damaged leaf ledger aliases
+         * one of this space's table frames. Normal mappings reject this. */
+        if(pa==space->pml4 || pa==space->pdpt || pa==space->pd || pa==space->pt)
+            continue;
         /* The owner ledger is authoritative even if a fault or a test has
          * already damaged the mapping bit.  Releasing an absent mapping is
          * harmless; page_free() then also reclaims an allocated-but-unmarked
          * frame instead of leaking it during rollback. */
-        (void)page_release_mapping(pa);
-        (void)page_free(pa);
+        if(page_is_mapped(pa))(void)page_release_mapping(pa);
+        if(!page_is_mapped(pa))(void)page_free(pa);
     }
-    if(space->pt) (void)page_free(space->pt);
-    if(space->pd) (void)page_free(space->pd);
-    if(space->pdpt) (void)page_free(space->pdpt);
-    if(space->pml4) (void)page_free(space->pml4);
+    uint64_t tables[4]={space->pt,space->pd,space->pdpt,space->pml4};
+    for(unsigned i=0;i<4;i++) {
+        uint64_t pa=tables[i];
+        if(!pa || !page_is_allocated(pa) || page_is_mapped(pa))continue;
+        bool duplicate=false;
+        for(unsigned j=0;j<i;j++)if(tables[j]==pa)duplicate=true;
+        if(!duplicate)(void)page_free(pa);
+    }
     *space=(struct vm_space){0};
 }
 /* Page-table pages are ordinary recycled physical pages, never implicitly
@@ -208,7 +225,9 @@ void vm_space_destroy(struct vm_space *space) {
 static bool vm_new_table(uint64_t *out) {
     uint64_t pa=page_alloc();
     if(!pa)return false;
-    zero_pt(pt_phys(pa));
+    uint64_t *table=pt_phys(pa);
+    if(!table) { (void)page_free(pa); return false; }
+    zero_pt(table);
     *out=pa;
     return true;
 }
@@ -226,11 +245,12 @@ bool vm_space_create(struct vm_space *space) {
     if(!original || !(original[0]&P) || (original[0]&HUGE) ||
        !original[0] || !(original[0]&ADDR))goto fail;
     uint64_t *original_pdpt=pt_phys(original[0]&ADDR);
-    if(!(original_pdpt[0]&P) || (original_pdpt[0]&HUGE) ||
+    if(!original_pdpt || !(original_pdpt[0]&P) || (original_pdpt[0]&HUGE) ||
        !(original_pdpt[0]&ADDR))goto fail;
     uint64_t *original_pd=pt_phys(original_pdpt[0]&ADDR);
     uint64_t *pml4=pt_phys(space->pml4),*pdpt=pt_phys(space->pdpt);
     uint64_t *pd=pt_phys(space->pd);
+    if(!original_pd || !pml4 || !pdpt || !pd)goto fail;
     /* Limine may mark an HHDM root entry user-accessible even though the
      * mapping is only used by the kernel.  Never carry that privilege into a
      * process CR3: supervisor code can still use the mapping with U cleared,
@@ -447,6 +467,7 @@ bool vm_space_clone(struct vm_space *dst,const struct vm_space *src) {
     if(!dst || !src || dst==src || !vm_space_validate(src) ||
        !vm_space_create(dst))return false;
     uint64_t *from=pt_phys(src->pt),*to=pt_phys(dst->pt);
+    if(!from || !to) {vm_space_destroy(dst);return false;}
     for(unsigned i=0;i<USER_PAGES;i++) if(from[i]&P) {
         if(!(from[i]&U) || !page_is_allocated(from[i]&ADDR)) {
             vm_space_destroy(dst);return false;
@@ -454,6 +475,11 @@ bool vm_space_clone(struct vm_space *dst,const struct vm_space *src) {
         uint64_t pa=page_alloc();
         if(!pa) {vm_space_destroy(dst);return false;}
         uint64_t *a=pt_phys(from[i]&ADDR),*b=pt_phys(pa);
+        if(!a || !b) {
+            (void)page_free(pa);
+            vm_space_destroy(dst);
+            return false;
+        }
         for(unsigned j=0;j<512;j++)b[j]=a[j];
         if(!page_claim_mapping(pa)) {
             (void)page_free(pa);vm_space_destroy(dst);return false;
@@ -475,6 +501,7 @@ uint64_t vm_space_anonymous(struct vm_space *space,unsigned pages) {
             uint64_t pa=page_alloc();
             if(!pa)break;
             uint64_t *dst=pt_phys(pa);
+            if(!dst) { (void)page_free(pa); break; }
             zero_pt(dst);
             if(!vm_space_map(space,ANON_FIRST+start+mapped,pa,true,false)) {
                 (void)page_free(pa);break;
@@ -549,6 +576,14 @@ static bool vm_space_transfer(const struct vm_space *space,uint64_t user,void *b
                               size_t length,bool to_user) {
     if(!vm_space_check(space,user,length,to_user))return false;
     uint64_t *pt=pt_phys(space->pt);
+    if(!pt)return false;
+    /* Resolve every physical alias before copying. An inaccessible frame
+     * must not turn a valid cross-page request into a partial transfer. */
+    if(length) {
+        unsigned first=(unsigned)((user-USER_BASE)>>12);
+        unsigned last=(unsigned)((user+length-1-USER_BASE)>>12);
+        for(unsigned i=first;i<=last;i++)if(!phys_ptr(pt[i]&ADDR))return false;
+    }
     uint8_t *bytes=buffer;
     size_t done=0;
     while(done<length) {

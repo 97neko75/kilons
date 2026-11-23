@@ -71,6 +71,12 @@ int vfs_close(int fd);
 /* One ref per process-local descriptor; dup/fork share file offset. */
 int vfs_last_reference(int fd);
 int vfs_retain(int fd);
+/* cwd_mark pins the fd's existing reference; cwd_retain adds a process CWD
+ * reference. cwd_release drops one CWD reference. Ordinary vfs_close cannot
+ * consume a reference that is still serving as a process working directory. */
+int vfs_cwd_mark(int fd);
+int vfs_cwd_retain(int fd);
+int vfs_cwd_release(int fd);
 size_t vfs_directory_record_size(int fd);
 int vfs_read(int fd, void *buffer, size_t count);
 int vfs_write(int fd, const void *buffer, size_t count);

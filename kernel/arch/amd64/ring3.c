@@ -101,7 +101,7 @@ static bool load_elf(struct vm_space *space,const unsigned char *file,size_t len
         uint64_t pa=page_alloc();if(!pa)return false;
         physical[j]=pa;
         uint8_t *dst=(uint8_t *)memory_phys_ptr(pa);
-        if(!dst)return false;
+        if(!dst) { physical[j]=0;(void)page_free(pa);return false; }
         for(unsigned k=0;k<PAGE;k++)dst[k]=0;
         if(!vm_space_map(space,j,pa,writable[j],executable_page[j])) { (void)page_free(pa);return false; }
     }
@@ -121,7 +121,7 @@ static bool load_stack(struct vm_space *space) {
     for(unsigned i=STACK_PAGE;i<STACK_PAGE+4;i++) {
         uint64_t pa=page_alloc();if(!pa)return false;
         uint8_t *dst=(uint8_t *)memory_phys_ptr(pa);
-        if(!dst)return false;
+        if(!dst) { (void)page_free(pa);return false; }
         for(unsigned j=0;j<PAGE;j++)dst[j]=0;
         if(!vm_space_map(space,i,pa,true,false)) { (void)page_free(pa);return false; }
     }
@@ -148,6 +148,20 @@ static struct user_task *free_task(void) {
     for(unsigned i=0;i<TASK_SLOTS;i++)if(!tasks[i].used)return &tasks[i];
     return NULL;
 }
+/* Retire process-private state while preserving the supervisor stack storage
+ * that is fixed to this reusable task slot. The bounded task table otherwise
+ * retains old register values, signal frames, and wait state after exit. */
+static void forget_task(struct user_task *t) {
+    if(!t)return;
+    t->pid=0;t->used=false;t->started=false;t->reason=0;t->exit_status=0;
+    t->wait_child=0;t->wait_status=0;t->wait_group=0;t->wait_user_status=0;
+    t->wait_write_pending=false;t->wait_peek=false;t->wait_info=false;t->wait_uid=0;
+    t->wait_events=0;t->pipe_written=0;
+    t->sleep_start=0;t->sleep_sec=0;t->sleep_nsec=0;t->sleep_remaining=0;
+    t->signals=(struct user_signals){0};
+    t->space=(struct vm_space){0};
+    t->regs=(struct user_context){0};
+}
 #include <kilons/exec_args.h>
 #define STACK_TOP (VM_USER_BASE+(STACK_PAGE+4)*PAGE)
 static int setup_task(struct user_task *t,const char *path) {
@@ -173,12 +187,13 @@ static int setup_task(struct user_task *t,const char *path) {
 }
 static int start_init(void) {
     struct user_task *t=free_task();if(!t)return -11;
+    forget_task(t);
     if(next_pid>=0x7fffffffU)return -11;
     uint32_t pid=next_pid++;
     int rc=setup_task(t,"/sbin/init");
-    if(rc<0)return rc;
+    if(rc<0) {forget_task(t);return rc;}
     if(!process_create_child(pid,0)) {
-        vm_space_destroy(&t->space);return -11;
+        vm_space_destroy(&t->space);forget_task(t);return -11;
     }
     t->pid=pid;t->reason=0;t->exit_status=255;t->started=false;
     t->wait_child=0;t->wait_user_status=0;t->wait_write_pending=false;
@@ -190,15 +205,16 @@ static int start_init(void) {
 int ring3_fork(const struct user_context *parent_context) {
     if(!current_task || !parent_context)return -22;
     struct user_task *t=free_task();if(!t)return -11;
+    forget_task(t);
     if(next_pid>=0x7fffffffU)return -11;
     uint32_t pid=next_pid++;
     t->space=(struct vm_space){0};
-    if(!vm_space_clone(&t->space,&current_task->space))return -12;
+    if(!vm_space_clone(&t->space,&current_task->space)) {forget_task(t);return -12;}
     if(!process_create_child(pid,current_task->pid)) {
-        vm_space_destroy(&t->space);return -11;
+        vm_space_destroy(&t->space);forget_task(t);return -11;
     }
     if(!posix_task_clone(current_task->pid,pid)) {
-        (void)process_abort(pid);vm_space_destroy(&t->space);return -24;
+        (void)process_abort(pid);vm_space_destroy(&t->space);forget_task(t);return -24;
     }
     /* Only live handler frames need to survive a fork inside a handler. */
     struct user_signals *dst=&t->signals,*src=&current_task->signals;
@@ -639,7 +655,7 @@ static void run_task(struct user_task *t) {
             release_vfork_parent(t->pid);
             (void)process_exit(t->pid,255<<8);
             vm_space_destroy(&t->space);
-            t->used=false;
+            forget_task(t);
             return;
         }
         t->started=true;
@@ -653,7 +669,7 @@ static void run_task(struct user_task *t) {
         (void)process_exit(t->pid,255<<8);
         release_vfork_parent(t->pid);
         vm_space_destroy(&t->space);
-        t->used=false;
+        forget_task(t);
         posix_task_activate(0);
         return;
     }
@@ -721,10 +737,12 @@ static void run_task(struct user_task *t) {
             int status;
             (void)process_collect(parent_pid,t->pid,&status);
         }
+        uint32_t exited_pid=t->pid;
+        unsigned exited_status=(unsigned)t->exit_status;
         vm_space_destroy(&t->space);
-        console_write("kilons: user PID=");print_uint(t->pid);
-        console_write(" exited status=");print_uint((unsigned)t->exit_status);console_write("\n");
-        t->used=false;
+        console_write("kilons: user PID=");print_uint(exited_pid);
+        console_write(" exited status=");print_uint(exited_status);console_write("\n");
+        forget_task(t);
     }
     /* Exit must release task descriptors BEFORE clearing the active task.
      * A yielding/blocked task keeps its own IO table for its next run. */
@@ -839,9 +857,9 @@ void ring3_boot(void) {
             /* Poll the controller while idle as well. Firmware interrupt
              * routing may leave IRQ1 unavailable after bootloader handoff.
              * HLT would prevent the dispatcher from seeing queued input. */
-            __asm__ volatile("cli" ::: "memory");
             keyboard_service();
-            __asm__ volatile("sti;pause");
+            interrupt_poll_timer();
+            __asm__ volatile("sti;pause" ::: "memory");
             wake_waiters();
         }
     }

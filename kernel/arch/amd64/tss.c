@@ -1,6 +1,6 @@
 #include <stdint.h>
 #include <stddef.h>
-/* Reinstall GDT using the same CS/DS selectors as bootstrap (0x08/0x10).
+/* Install kernel-owned CS/DS selectors (0x08/0x10).
  * IST1 handles double fault, IST2 page fault. */
 struct __attribute__((packed)) tss64 {
     uint32_t reserved0; uint64_t rsp0,rsp1,rsp2; uint64_t reserved1;
@@ -13,7 +13,7 @@ static struct tss64 tss;
 static uint8_t df_stack[8192] __attribute__((aligned(16)));
 static uint8_t pf_stack[8192] __attribute__((aligned(16)));
 void tss_init(void) {
-    gdt[0]=0;gdt[1]=0x00af9a000000ffffULL;gdt[2]=0x00af92000000ffffULL;
+    gdt[0]=0;gdt[1]=0x00af9a000000ffffULL;gdt[2]=0x00cf92000000ffffULL;
     tss.ist1=(uint64_t)(uintptr_t)(df_stack+sizeof(df_stack));
     tss.ist2=(uint64_t)(uintptr_t)(pf_stack+sizeof(pf_stack));
     tss.iomap=sizeof(tss);
@@ -23,9 +23,22 @@ void tss_init(void) {
     gdt[4]=base>>32;
     /* Ring 3 64-bit code and data segments, selectors 0x2b / 0x33. */
     gdt[5]=0x00affa000000ffffULL;
-    gdt[6]=0x00aff2000000ffffULL;
+    gdt[6]=0x00cff2000000ffffULL;
     struct gdtr desc={(uint16_t)(sizeof(gdt)-1),(uint64_t)(uintptr_t)gdt};
     __asm__ volatile("lgdt %0" :: "m"(desc) : "memory");
+    /* LGDT does not reload cached selectors. Limine's CS can be 0x28,
+     * which names user code in this GDT; an IRQ return would then #GP.
+     * Reload CS and the data selectors before enabling interrupts. */
+    __asm__ volatile(
+        "pushq $0x08\n"
+        "leaq 1f(%%rip), %%rax\n"
+        "pushq %%rax\n"
+        "lretq\n"
+        "1: movw $0x10, %%ax\n"
+        "movw %%ax, %%ds\n"
+        "movw %%ax, %%es\n"
+        "movw %%ax, %%ss\n"
+        ::: "rax", "memory");
     uint16_t selector=0x18;
     __asm__ volatile("ltr %0" :: "r"(selector) : "memory");
 }

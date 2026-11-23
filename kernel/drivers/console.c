@@ -53,6 +53,7 @@ void console_clear(void) {
     cursor_update();
 }
 void console_init(void) {
+    screen_ready = false;
     struct fb_response *reply = fb_request.response;
     if (!reply || !reply->count || !reply->buffers || !reply->buffers[0]) return;
     fb = *reply->buffers[0];
@@ -63,6 +64,11 @@ void console_init(void) {
     pixel_bytes = fb.bpp / 8;
     if (fb.pitch / pixel_bytes < fb.width || fb.pitch > SIZE_MAX / fb.height) return;
     white = (255u << fb.red_shift) | (255u << fb.green_shift) | (255u << fb.blue_shift);
+    uint32_t red = 255u << fb.red_shift;
+    uint32_t green = 255u << fb.green_shift;
+    uint32_t blue = 255u << fb.blue_shift;
+    if ((red & green) || (red & blue) || (green & blue)) return;
+    if ((uintptr_t)fb.address > UINTPTR_MAX - fb.pitch * fb.height) return;
     screen_ready = true;
     console_clear();
 }
@@ -89,7 +95,7 @@ static void putc_screen(char ch) {
     }
     cursor_update();
 }
-/* A small ANSI CSI interpreter keeps the VGA view synchronized with the
+/* A small ANSI CSI interpreter keeps the framebuffer synchronized with the
  * serial terminal. PKS uses cursor-left/right and erase-to-end-of-line for
  * in-place editing. Ordinary output still passes through unchanged. */
 static unsigned csi_state, csi_count, csi_value;
@@ -124,7 +130,19 @@ void console_putc(char ch) {
             return;
         }
         unsigned n = csi_count ? csi_value : 1u;
-        if (ch == 'D') cursor_left_n(n);
+        if (ch == 'J' && csi_value == 2) {
+            /* CSI 2 J erases the display without moving the cursor. */
+            for (size_t i = 0; i < WIDTH * HEIGHT; ++i) {
+                cells[i] = ' ';
+                paint(i, false);
+            }
+            cursor_update();
+        }
+        else if (ch == 'H' && !csi_count) {
+            row = col = 0;
+            cursor_update();
+        }
+        else if (ch == 'D') cursor_left_n(n);
         else if (ch == 'C') cursor_right_n(n);
         else if (ch == 'K' && (csi_value == 0 || csi_count == 0)) {
             for (size_t x = col; x < WIDTH; ++x)
@@ -138,7 +156,7 @@ void console_putc(char ch) {
     putc_screen(ch);
 }
 void console_write(const char *text) { while (*text) console_putc(*text++); }
-/* VGA-only painting: never mirror interactive redraws to serial. */
+/* Screen-only painting: never mirror interactive redraws to serial. */
 void console_screen_putc(char ch) { if (screen_ready) putc_screen(ch); }
 
 /* Shell line editing must never use destructive backspace for navigation. */

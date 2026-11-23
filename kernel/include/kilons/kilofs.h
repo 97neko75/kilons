@@ -65,6 +65,11 @@ struct kilofs {
     uint32_t cursor;
     uint32_t journal_sequence;
     uint32_t journal_start,journal_blocks,data_start;
+    /* Re-entrant UP guard for the complete filesystem state. It prevents
+     * interrupt re-entry while metadata/cache operations are in flight;
+     * SMP ownership is intentionally not claimed by this prototype. */
+    unsigned guard_depth;
+    uint64_t guard_flags;
     unsigned mounted,readonly;
     uint32_t uid,gid;
 };

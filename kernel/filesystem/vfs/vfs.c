@@ -7,6 +7,7 @@
 #include <kilons/fat32_vfs.h>
 #include <kilons/kilofs.h>
 #include <kilons/kilofs_block.h>
+#include <kilons/irq_guard.h>
 #include <stdint.h>
 /* Small mount-based kernel VFS. Mount selection and descriptors belong here;
  * backing filesystems implement the operations and know no absolute paths. */
@@ -32,7 +33,7 @@ struct fs_ops {
     int (*readlink)(const char *,char *,size_t);
 };
 struct mount { const char *path; const struct fs_ops *ops; int active; int readonly; int keep_prefix; };
-struct descriptor { unsigned refs; uint64_t inode; int backend_fd; unsigned flags; const struct fs_ops *ops; size_t offset; unsigned append,nonblock,sync_flags; char path[256]; uint64_t detached_id; struct ramfs_info directory; };
+struct descriptor { unsigned refs,cwd_refs; uint64_t inode; int backend_fd; unsigned flags; const struct fs_ops *ops; size_t offset; unsigned append,nonblock,sync_flags; char path[256]; uint64_t detached_id; struct ramfs_info directory; };
 static struct mount mounts[MOUNT_COUNT];
 static struct descriptor fds[FD_COUNT];
 static const struct fs_ops ram_ops = {
@@ -187,6 +188,35 @@ static struct dentry_cache dentry_cache[DENTRY_SLOTS];
 static unsigned inode_hand,dentry_hand;
 static uint32_t cred_uid,cred_gid;
 static int last_errno;
+/* VFS state is owned by one kernel dispatcher today. This nested guard
+ * closes the interrupt re-entry window around mount, dentry/inode-cache and
+ * descriptor-table updates. It is deliberately a UP guard, not an SMP
+ * mutex; an SMP port must replace this boundary with ownership-aware locks. */
+struct vfs_guard { int unused; };
+static unsigned vfs_guard_depth;
+#if !__STDC_HOSTED__
+static uint64_t vfs_guard_flags;
+#endif
+static struct vfs_guard vfs_guard_enter(void){
+    struct vfs_guard guard={0};
+    if(vfs_guard_depth++==0){
+#if !__STDC_HOSTED__
+        vfs_guard_flags=kilons_irq_save();
+#endif
+    }
+    return guard;
+}
+static void vfs_guard_leave(struct vfs_guard *guard){
+    (void)guard;
+    if(vfs_guard_depth && --vfs_guard_depth==0){
+#if !__STDC_HOSTED__
+        kilons_irq_restore(vfs_guard_flags);
+#endif
+    }
+}
+#define VFS_GUARD \
+    struct vfs_guard vfs_guard_scope __attribute__((cleanup(vfs_guard_leave))) = \
+        vfs_guard_enter()
 static int fail(int err) {last_errno=err;return -1;}
 /* Backends use -1 for an unspecified failure and negative K_errno values
  * when they know the exact cause. Preserve the latter at the VFS boundary. */
@@ -195,6 +225,7 @@ static int backend_errno(int rc,int fallback) {
 }
 int vfs_errno(void) {return last_errno;}
 void vfs_set_credentials(uint32_t uid,uint32_t gid) {
+    VFS_GUARD;
     cred_uid=uid;cred_gid=gid;ramfs_set_identity(uid,gid);
     diskfs.uid=uid;diskfs.gid=gid;
 }
@@ -254,6 +285,16 @@ static int sticky_denied(const char *full,const struct ramfs_info *target) {
     if(raw_stat(parent,&dir)<0)return 1;
     return (dir.mode&01000U) && cred_uid!=0 && cred_uid!=dir.uid && cred_uid!=target->uid;
 }
+static int sticky_destination_denied(const char *full,const struct ramfs_info *source) {
+    char parent[256];copy_path(parent,full);
+    unsigned n=0;while(parent[n])n++;
+    while(n>1 && parent[n-1]!='/')n--;
+    if(n>1)parent[n-1]=0;else {parent[0]='/';parent[1]=0;}
+    struct ramfs_info dir;
+    if(raw_stat(parent,&dir)<0)return 1;
+    return (dir.mode&01000U) && cred_uid!=0 &&
+           cred_uid!=dir.uid && cred_uid!=source->uid;
+}
 /* Component-by-component traversal matters: /missing/../good must not
  * silently bypass a nonexistent directory; /file/../good is ENOTDIR.
  * A user-level relative pathname has already been joined to its CWD. */
@@ -301,7 +342,8 @@ root:
         full[n]=0;
         int rc=raw_stat(full,&cur);
         if(rc==0 && (cur.mode&0170000)==0120000) {
-            if(last && *p && policy==ENTRY)return fail(K_ENOTDIR);
+            /* A trailing slash requires directory resolution, so it follows
+             * the final symlink even for entry-oriented operations. */
             if(!last || *p || policy==FOLLOW) {
                 if(++hops>40)return fail(K_ELOOP);
                 char target[256], joined[256];
@@ -351,9 +393,11 @@ static int checked(const char *path,char *out,int missing,int *exists) {
     return walk(path,out,missing,exists,FOLLOW);
 }
 int vfs_resolve_path(const char *path,char out[256]) {
+    VFS_GUARD;
     return checked(path,out,0,0);
 }
 int vfs_readlink_from(struct vfs_base base,const char *path,char *buf,size_t size) {
+    VFS_GUARD;
     char full[256];
     if(!buf&&size)return fail(K_EFAULT);
     if(walk_at(base,path,full,0,0,LINK_ITSELF)<0)return -1;
@@ -367,6 +411,7 @@ int vfs_readlink(const char *path,char *buf,size_t size) {
     return vfs_readlink_from((struct vfs_base){0},path,buf,size);
 }
 int vfs_symlink_from(struct vfs_base base,const char *target,const char *path) {
+    VFS_GUARD;
     char full[256];
     int exists;
     if(!target)return fail(K_EFAULT);
@@ -386,6 +431,7 @@ int vfs_symlink(const char *target,const char *path) {
     return vfs_symlink_from((struct vfs_base){0},target,path);
 }
 int vfs_mount_fat32(const char *path,int block_id) {
+    VFS_GUARD;
     if(cred_uid!=0)return fail(K_EACCES);
     char full[256];struct ramfs_info info;
     if(checked(path,full,0,0)<0)return -1;
@@ -402,6 +448,7 @@ static int slot(int fd) { return fd>=3 && fd<3+FD_COUNT && fds[fd-3].refs; }
  * always read-only. RW testing is restricted to block device 0 (RAM disk).
  * This does not add a userspace mount syscall. */
 int vfs_mount_kilofs(const char *path,int block_id,int rw_test_ramdisk){
+    VFS_GUARD;
     char full[256];struct ramfs_info info;
     if(cred_uid!=0)return fail(K_EACCES);
     if(checked(path,full,0,0)<0)return -1;
@@ -427,6 +474,7 @@ int vfs_mount_kilofs(const char *path,int block_id,int rw_test_ramdisk){
 /* Called once before userspace. Keep the module accessible at its original
  * mount, and retain the RAMFS /tmp subtree for volatile files. */
 int vfs_use_boot_root(void) {
+    VFS_GUARD;
     struct kfs_info init,tmp;
     if(!diskfs.mounted || !diskfs.readonly ||
        kfs_stat(&diskfs,"sbin/init",&init)<0 || init.kind!=KFS_KIND_FILE ||
@@ -444,29 +492,36 @@ int vfs_use_boot_root(void) {
     cache_invalidate();return 0;
 }
 int vfs_set_nonblock(int fd,int enabled) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     fds[fd-3].nonblock=!!enabled;
     return 0;
 }
 int vfs_get_nonblock(int fd) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     return (int)fds[fd-3].nonblock;
 }
 int vfs_set_append(int fd,int enabled){
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     fds[fd-3].append=!!enabled;last_errno=0;return 0;
 }
 void vfs_set_sync(int fd,unsigned flags) {
+    VFS_GUARD;
     if(slot(fd))fds[fd-3].sync_flags=flags;
 }
 unsigned vfs_get_sync(int fd) {
+    VFS_GUARD;
     return slot(fd)?fds[fd-3].sync_flags:0;
 }
 int vfs_get_append(int fd){
+    VFS_GUARD;
     if(!slot(fd)){(void)fail(K_EBADF);return -1;}
     last_errno=0;return !!fds[fd-3].append;
 }
 int vfs_fsync(int fd){
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(d->ops==&kfs_ops){int rc=kfs_sync(&diskfs);if(rc<0)return fail(backend_errno(rc,K_EIO));}
@@ -475,7 +530,8 @@ int vfs_fsync(int fd){
 }
 
 void vfs_init(void) {
-    for(int i=0;i<FD_COUNT;i++) fds[i].refs=0;
+    VFS_GUARD;
+    for(int i=0;i<FD_COUNT;i++) fds[i]=(struct descriptor){0};
     for(int i=0;i<MOUNT_COUNT;i++) mounts[i].active=0;
     inode_hand=0;dentry_hand=0;last_errno=0;fat_mount_path[0]=0;kilofs_mount_path[0]=0;cache_invalidate();vfs_set_credentials(0,0);
     /* Early root filesystem: one RAMFS instance with real directories. */
@@ -486,6 +542,7 @@ int vfs_open(const char *path, unsigned flags, int create) {
     return vfs_open_mode(path,flags,create,0644U);
 }
 int vfs_open_mode_from(struct vfs_base base,const char *path,unsigned flags,int create,unsigned mode) {
+    VFS_GUARD;
     char full[256];const char *relative;int exists;struct ramfs_info info;
     unsigned exec=flags&VFS_EXEC;
     flags&=~VFS_EXEC;
@@ -537,6 +594,7 @@ int vfs_open_mode(const char *path,unsigned flags,int create,unsigned mode) {
     return vfs_open_mode_from((struct vfs_base){0},path,flags,create,mode);
 }
 int vfs_lock_file(int fd,struct lock_file *file) {
+    VFS_GUARD;
     if(!slot(fd) || fds[fd-3].directory.is_dir)return 0;
     const struct descriptor *d=&fds[fd-3];
     /* Each backend currently owns one filesystem instance. Boot root can
@@ -548,14 +606,34 @@ int64_t vfs_offset(int fd) {
     return slot(fd)?(int64_t)fds[fd-3].offset:-K_EBADF;
 }
 int vfs_last_reference(int fd) {
+    VFS_GUARD;
     return slot(fd) && fds[fd-3].refs==1;
 }
 int vfs_retain(int fd) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     if(fds[fd-3].refs==0xffffU)return fail(K_ENFILE);
     fds[fd-3].refs++;last_errno=0;return 0;
 }
-int vfs_close(int fd) {
+int vfs_cwd_mark(int fd) {
+    VFS_GUARD;
+    if(!slot(fd))return fail(K_EBADF);
+    struct descriptor *d=&fds[fd-3];
+    if(!d->directory.is_dir)return fail(K_ENOTDIR);
+    if(!d->path[0])return fail(K_ENOENT);
+    if(d->cwd_refs==0xffffU)return fail(K_ENFILE);
+    d->cwd_refs++;last_errno=0;return 0;
+}
+int vfs_cwd_retain(int fd) {
+    VFS_GUARD;
+    if(!slot(fd))return fail(K_EBADF);
+    struct descriptor *d=&fds[fd-3];
+    if(!d->directory.is_dir)return fail(K_ENOTDIR);
+    if(!d->path[0])return fail(K_ENOENT);
+    if(d->refs==0xffffU || d->cwd_refs==0xffffU)return fail(K_ENFILE);
+    d->refs++;d->cwd_refs++;last_errno=0;return 0;
+}
+static int close_ref(int fd) {
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(d->refs>1) {d->refs--;last_errno=0;return 0;}
@@ -566,7 +644,23 @@ int vfs_close(int fd) {
     }
     d->refs=0;last_errno=0;return 0;
 }
+int vfs_cwd_release(int fd) {
+    VFS_GUARD;
+    if(!slot(fd))return fail(K_EBADF);
+    struct descriptor *d=&fds[fd-3];
+    if(!d->cwd_refs)return fail(K_EINVAL);
+    d->cwd_refs--;
+    if(close_ref(fd)<0){d->cwd_refs++;return -1;}
+    return 0;
+}
+int vfs_close(int fd) {
+    VFS_GUARD;
+    if(!slot(fd))return fail(K_EBADF);
+    if(fds[fd-3].refs<=fds[fd-3].cwd_refs)return fail(K_EBADF);
+    return close_ref(fd);
+}
 size_t vfs_directory_record_size(int fd){
+    VFS_GUARD;
     return slot(fd) && fds[fd-3].directory.is_dir?sizeof(struct dirent):0;
 }
 /* Directory reads yield one complete public dirent. The open description
@@ -600,6 +694,7 @@ static int read_directory(struct descriptor *d,void *buf,size_t size){
     d->offset++;return sizeof entry;
 }
 int vfs_read(int fd,void *buf,size_t n) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(!(d->flags&VFS_READ))return fail(K_EBADF);
@@ -612,6 +707,7 @@ int vfs_read(int fd,void *buf,size_t n) {
     d->offset+=(size_t)rc;last_errno=0;return rc;
 }
 int vfs_write(int fd, const void *buf, size_t n) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(!(d->flags&VFS_WRITE))return fail(K_EBADF);
@@ -635,6 +731,7 @@ int vfs_write(int fd, const void *buf, size_t n) {
     last_errno=0;return rc;
 }
 int vfs_seek(int fd, size_t offset) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(d->directory.is_dir || !d->ops->seek)return fail(K_ESPIPE);
@@ -649,6 +746,7 @@ static int is_mount_ancestor(const char *full) {
     return 0;
 }
 int vfs_unlink_from(struct vfs_base base,const char *path) {
+    VFS_GUARD;
     char full[256];const char *relative;struct ramfs_info info;
     if(walk_at(base,path,full,0,0,ENTRY)<0)return -1;
     if(is_mount_ancestor(full))return fail(K_EACCES);
@@ -669,6 +767,7 @@ int vfs_mkdir(const char *path) {
     return vfs_mkdir_mode(path,0755U);
 }
 int vfs_mkdir_mode_from(struct vfs_base base,const char *path,unsigned mode) {
+    VFS_GUARD;
     char full[256];const char *relative;int exists;
     if(walk_at(base,path,full,2,&exists,ENTRY)<0)return -1;
     if(exists)return fail(K_EEXIST);
@@ -705,16 +804,27 @@ static void detach_directory(const char *path,const struct ramfs_info *info) {
         d->directory=*info;
     }
 }
+static int directory_is_cwd(const struct mount *mnt,uint64_t ino) {
+    for(unsigned i=0;i<FD_COUNT;i++) {
+        const struct descriptor *d=&fds[i];
+        if(d->refs && d->cwd_refs && d->directory.is_dir &&
+           d->ops==mnt->ops && d->directory.ino==ino)return 1;
+    }
+    return 0;
+}
 int vfs_rmdir_from(struct vfs_base base,const char *path) {
+    VFS_GUARD;
     char full[256];const char *relative;struct ramfs_info info;
     if(walk_at(base,path,full,0,0,ENTRY)<0)return -1;
     if(dot_leaf(path))return fail(K_EINVAL);
     if(is_mount_ancestor(full))return fail(K_EACCES);
     int stat_rc=raw_stat(full,&info);if(stat_rc<0)return fail(backend_errno(stat_rc,K_ENOENT));
     if(!info.is_dir)return fail(K_ENOTDIR);
+    const struct mount *mnt=resolve(full,&relative);
+    if(!mnt)return fail(K_ENOENT);
+    if(directory_is_cwd(mnt,info.ino))return fail(K_EBUSY);
     if(!parent_permission(full,2U))return fail(K_EACCES);
     if(sticky_denied(full,&info))return fail(K_EPERM);
-    const struct mount *mnt=resolve(full,&relative);
     if(!mnt || !mnt->ops->rmdir||mnt->readonly)return fail(K_EROFS);
     int rc=mnt->ops->rmdir(relative);
     if(rc<0)return fail(backend_errno(rc,K_ENOTEMPTY));
@@ -725,6 +835,7 @@ int vfs_rmdir(const char *path) {
     return vfs_rmdir_from((struct vfs_base){0},path);
 }
 int vfs_link_from(struct vfs_base base,struct vfs_base destination,const char *source,const char *dest,int follow) {
+    VFS_GUARD;
     char oldpath[256],newpath[256];
     int exists;
     if(walk_at(base,source,oldpath,0,0,follow?FOLLOW:LINK_ITSELF)<0 ||
@@ -750,6 +861,7 @@ int vfs_link(const char *source,const char *dest,int follow) {
     return vfs_link_from((struct vfs_base){0},(struct vfs_base){0},source,dest,follow);
 }
 int vfs_rename_from(struct vfs_base base,struct vfs_base destination,const char *oldpath,const char *newpath) {
+    VFS_GUARD;
     char oldfull[256],newfull[256];const char *oldrel,*newrel;int exists;
     if(walk_at(base,oldpath,oldfull,0,0,ENTRY)<0 || walk_at(destination,newpath,newfull,1,&exists,ENTRY)<0)return -1;
     if(dot_leaf(oldpath) || dot_leaf(newpath))return fail(K_EINVAL);
@@ -758,14 +870,24 @@ int vfs_rename_from(struct vfs_base base,struct vfs_base destination,const char 
     if(!*oldrel || !*newrel)return fail(K_EACCES);
     for(int i=0;i<MOUNT_COUNT;i++)if(mounts[i].active &&
         (mount_match(mounts[i].path,oldfull) || mount_match(mounts[i].path,newfull)))return fail(K_EACCES);
-    if(!parent_permission(oldfull,2U) || !parent_permission(newfull,2U))return fail(K_EACCES);
     struct ramfs_info source;
     int stat_rc=raw_stat(oldfull,&source);if(stat_rc<0)return fail(backend_errno(stat_rc,K_ENOENT));
-    if(sticky_denied(oldfull,&source))return fail(K_EPERM);
     struct ramfs_info dest;
     if(exists) {
         stat_rc=raw_stat(newfull,&dest);if(stat_rc<0)return fail(backend_errno(stat_rc,K_ENOENT));
+        /* POSIX rename is a successful no-op when both names already denote
+         * the same directory entry or inode. */
+        if(same(oldfull,newfull) || source.ino==dest.ino) {
+            last_errno=0;return 0;
+        }
+    }
+    if(!parent_permission(oldfull,2U) || !parent_permission(newfull,2U))return fail(K_EACCES);
+    if(sticky_denied(oldfull,&source))return fail(K_EPERM);
+    if(exists) {
         if(sticky_denied(newfull,&dest))return fail(K_EPERM);
+        if(dest.is_dir && !same(oldfull,newfull) && directory_is_cwd(b,dest.ino))return fail(K_EBUSY);
+    } else if(sticky_destination_denied(newfull,&source)) {
+        return fail(K_EPERM);
     }
     if(!a->ops->rename||a->readonly)return fail(K_EROFS);
     size_t oldlen=0,newlen=0;
@@ -795,6 +917,7 @@ int vfs_rename(const char *oldpath,const char *newpath) {
     return vfs_rename_from((struct vfs_base){0},(struct vfs_base){0},oldpath,newpath);
 }
 int vfs_truncate_from(struct vfs_base base,const char *path,size_t size) {
+    VFS_GUARD;
     char full[256];const char *relative;struct ramfs_info info;
     if(walk_at(base,path,full,0,0,FOLLOW)<0)return -1;
     int stat_rc=raw_stat(full,&info);if(stat_rc<0)return fail(backend_errno(stat_rc,K_ENOENT));
@@ -810,6 +933,7 @@ int vfs_truncate(const char *path,size_t size) {
     return vfs_truncate_from((struct vfs_base){0},path,size);
 }
 int vfs_ftruncate(int fd, size_t size) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     struct descriptor *d=&fds[fd-3];
     if(!(d->flags&VFS_WRITE))return fail(K_EBADF);
@@ -819,6 +943,7 @@ int vfs_ftruncate(int fd, size_t size) {
     cache_invalidate();last_errno=0;return 0;
 }
 const char *vfs_directory_path(int fd) {
+    VFS_GUARD;
     if(!slot(fd)){fail(K_EBADF);return NULL;}
     struct descriptor *d=&fds[fd-3];
     if(!d->directory.is_dir){fail(K_ENOTDIR);return NULL;}
@@ -828,6 +953,7 @@ const char *vfs_directory_path(int fd) {
 /* The dispatcher serializes filesystem operations; restore the shared
  * open description before returning, including on short reads/errors. */
 int vfs_exec_image(int fd,void *buffer,size_t capacity) {
+    VFS_GUARD;
     if(!slot(fd))return -K_EBADF;
     if(!buffer&&capacity)return -K_EFAULT;
     struct descriptor *d=&fds[fd-3];
@@ -851,6 +977,7 @@ int vfs_exec_image(int fd,void *buffer,size_t capacity) {
     return error?error:(int)used;
 }
 int vfs_fstat(int fd,struct vfs_info *info) {
+    VFS_GUARD;
     if(!slot(fd))return fail(K_EBADF);
     if(!info)return fail(K_EFAULT);
     struct descriptor *d=&fds[fd-3];
@@ -878,6 +1005,7 @@ static int stat_resolved(const char *full,struct vfs_info *info) {
     last_errno=0;return 0;
 }
 int vfs_stat_from(struct vfs_base base,const char *path,struct vfs_info *info,int nofollow) {
+    VFS_GUARD;
     char full[256];
     if(!info)return fail(K_EFAULT);
     if(walk_at(base,path,full,0,0,nofollow?LINK_ITSELF:FOLLOW)<0)return -1;
@@ -886,6 +1014,7 @@ int vfs_stat_from(struct vfs_base base,const char *path,struct vfs_info *info,in
 int vfs_stat(const char *path,struct vfs_info *info) {return vfs_stat_from((struct vfs_base){0},path,info,0);}
 int vfs_lstat(const char *path,struct vfs_info *info) {return vfs_stat_from((struct vfs_base){0},path,info,1);}
 int vfs_readdir(const char *path,unsigned index,struct vfs_dirent *entry) {
+    VFS_GUARD;
     char full[256];const char *relative;struct ramfs_info info;
     if(!entry)return fail(K_EFAULT);
     if(checked(path,full,0,0)<0)return -1;
@@ -902,6 +1031,7 @@ int vfs_readdir(const char *path,unsigned index,struct vfs_dirent *entry) {
     last_errno=0;return rc;
 }
 int vfs_accessat_from(struct vfs_base base,const char *path,unsigned mask,int nofollow) {
+    VFS_GUARD;
     char full[256];struct ramfs_info info;
     if(mask&~7U)return fail(K_EINVAL);
     if(walk_at(base,path,full,0,0,nofollow?LINK_ITSELF:FOLLOW)<0)return -1;
@@ -914,10 +1044,12 @@ int vfs_accessat_from(struct vfs_base base,const char *path,unsigned mask,int no
     last_errno=0;return 0;
 }
 int vfs_accessat(const char *path,unsigned mask,int nofollow) {
+    VFS_GUARD;
     return vfs_accessat_from((struct vfs_base){0},path,mask,nofollow);
 }
 int vfs_access(const char *path,unsigned mask) {return vfs_accessat(path,mask,0);}
 int vfs_faccess(int fd,unsigned mask) {
+    VFS_GUARD;
     struct vfs_info st;
     if(vfs_fstat(fd,&st)<0)return -1;
     struct ramfs_info info={st.is_dir,st.size,st.mode,st.uid,st.gid,st.ino,st.links,st.times,st.blocks};
@@ -933,6 +1065,7 @@ static int chmod_resolved(const char *full,unsigned mode) {
     cache_invalidate();last_errno=0;return 0;
 }
 int vfs_chmodat_from(struct vfs_base base,const char *path,unsigned mode,int nofollow) {
+    VFS_GUARD;
     char full[256];struct ramfs_info info;
     if(mode>07777U)return fail(K_EINVAL);
     if(walk_at(base,path,full,0,0,nofollow?LINK_ITSELF:FOLLOW)<0)return -1;
@@ -943,10 +1076,12 @@ int vfs_chmodat_from(struct vfs_base base,const char *path,unsigned mode,int nof
     return chmod_resolved(full,mode);
 }
 int vfs_chmodat(const char *path,unsigned mode,int nofollow) {
+    VFS_GUARD;
     return vfs_chmodat_from((struct vfs_base){0},path,mode,nofollow);
 }
 int vfs_chmod(const char *path,unsigned mode) {return vfs_chmodat(path,mode,0);}
 int vfs_update_metadata_from(struct vfs_base base,const char *path,int fd,int nofollow,const struct inode_update *update) {
+    VFS_GUARD;
     struct vfs_info st;
     const struct fs_ops *ops;
     const char *relative=NULL;
@@ -1000,9 +1135,11 @@ int vfs_update_metadata_from(struct vfs_base base,const char *path,int fd,int no
     return 0;
 }
 int vfs_update_metadata(const char *path,int fd,int nofollow,const struct inode_update *update) {
+    VFS_GUARD;
     return vfs_update_metadata_from((struct vfs_base){0},path,fd,nofollow,update);
 }
 int vfs_fchmod(int fd,unsigned mode) {
+    VFS_GUARD;
     struct vfs_info st;
     if(mode>07777U)return fail(K_EINVAL);
     if(vfs_fstat(fd,&st)<0)return -1;
@@ -1068,6 +1205,7 @@ int64_t vfs_lseek(int fd,int64_t offset,unsigned whence) {
     return (int64_t)target;
 }
 int vfs_mount_info(unsigned index, struct vfs_mount_info *out) {
+    VFS_GUARD;
     if(!out) return -1;
     for(int i=0;i<MOUNT_COUNT;i++) if(mounts[i].active) {
         if(index) { index--; continue; }
@@ -1087,6 +1225,7 @@ int vfs_mount_info(unsigned index, struct vfs_mount_info *out) {
 static unsigned vfs_failure_line;
 unsigned vfs_selftest_failure_line(void) { return vfs_failure_line; }
 int vfs_selftest(void) {
+    VFS_GUARD;
     vfs_failure_line=0;
 #define TEST_FAIL() do { ok=0; if(!vfs_failure_line) vfs_failure_line=__LINE__; } while(0)
     static const char message[]="vfs check";

@@ -3,4 +3,5 @@
 #include <stdint.h>
 void interrupt_init(void);
 uint64_t interrupt_ticks(void);
+void interrupt_poll_timer(void);
 #endif

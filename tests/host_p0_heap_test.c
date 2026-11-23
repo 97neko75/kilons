@@ -79,9 +79,23 @@ int main(void){
     assert(heap_used_bytes()==65520 && !kmalloc(16));
     assert(kfree(large) && heap_used_bytes()==0);
     assert(kmalloc((size_t)-1)==NULL);
-    /* Repeated fragmentation without leaks or user-buffer corruption. */
+    /* Total free space is sufficient, but alternating holes cannot satisfy
+     * a large request until the intervening allocations are released. */
+    void *chunks[8];
+    for(unsigned i=0;i<8;i++) {
+        chunks[i]=kmalloc(7000);
+        assert(chunks[i]);
+    }
+    for(unsigned i=0;i<8;i+=2)assert(kfree(chunks[i]));
+    assert(!kmalloc(12000) && heap_validate());
+    for(unsigned i=1;i<8;i+=2)assert(kfree(chunks[i]));
+    assert(heap_used_bytes()==0 && heap_validate());
+    large=kmalloc(65520);
+    assert(large==(void *)(uintptr_t)(VM_HEAP_BASE+16));
+    assert(kfree(large) && heap_validate());
+    /* Sustained fragmentation/reuse without leaks or user-buffer corruption. */
     void *slots[64]={0};
-    for(unsigned round=0;round<500;round++) {
+    for(unsigned round=0;round<5000;round++) {
         for(unsigned j=0;j<64;j++) {
             size_t n=(j*13+round*7)%160+1;
             slots[j]=kmalloc(n);

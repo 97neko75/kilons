@@ -22,6 +22,12 @@ static unsigned remaining=POOL_FRAMES;
 static unsigned alloc_calls;
 static unsigned fail_nth;
 static void fail_after(unsigned nth) {fail_nth=nth;alloc_calls=0;}
+static uint64_t free_frame_at(unsigned ordinal) {
+    for(unsigned i=0;i<POOL_FRAMES;i++)if(!taken[i] && --ordinal==0)
+        return POOL_BASE+(uint64_t)i*PAGE;
+    assert(0 && "test physical pool exhausted");
+    return 0;
+}
 uint64_t page_alloc(void) {
     if(fail_nth && ++alloc_calls==fail_nth)return 0;
     for(unsigned i=0;i<POOL_FRAMES;i++)if(!taken[i]) {
@@ -128,6 +134,15 @@ int main(void){
         assert(remaining==before);
     }
     fail_after(0);
+    /* Inaccessible physical aliases at every page-table allocation point
+     * must free the failed frame and all earlier table pages. */
+    for(unsigned failure=1;failure<=4;failure++) {
+        struct vm_space s={0};unsigned before=remaining;
+        vm_host_fail_phys_access_for(free_frame_at(failure));
+        assert(!vm_space_create(&s));
+        assert(!s.pml4 && !s.pdpt && !s.pd && !s.pt);
+        assert(remaining==before);
+    }
     struct vm_space source={0};
     assert(vm_space_create(&source));
     for(unsigned i=0;i<2;i++) {
@@ -209,6 +224,20 @@ int main(void){
         assert(vm_space_copyin(&source,&value,VM_USER_BASE+100,1) && value==1);
     }
     fail_after(0);
+    /* A bad alias for a source page, then for the newly allocated child
+     * page, must unwind the child CR3 and leave the parent untouched. */
+    {
+        struct vm_space dst={0};unsigned before=remaining;
+        vm_host_fail_phys_access_for(words(source.pt)[0]&0x000ffffffffff000ULL);
+        assert(!vm_space_clone(&dst,&source) && remaining==before);
+        assert(vm_space_validate(&source));
+    }
+    {
+        struct vm_space dst={0};unsigned before=remaining;
+        vm_host_fail_phys_access_for(free_frame_at(5));
+        assert(!vm_space_clone(&dst,&source) && remaining==before);
+        assert(vm_space_validate(&source));
+    }
     struct vm_space cloned={0};
     assert(vm_space_clone(&cloned,&source));
     uint8_t change=99,read_back=0;
@@ -216,13 +245,21 @@ int main(void){
     assert(vm_space_copyin(&source,&read_back,VM_USER_BASE+1,1) && read_back==1);
     vm_space_destroy(&cloned);
     /* Anonymous mapping failure must not leak any partial mappings/frames. */
-    for(unsigned failure=1;failure<=2;failure++) {
+    for(unsigned failure=1;failure<=8;failure++) {
         unsigned before=remaining;
         fail_after(failure);
-        assert(!vm_space_anonymous(&source,2));
+        assert(!vm_space_anonymous(&source,8));
         assert(source.anon_pages==0 && remaining==before);
+        assert(vm_space_validate(&source));
     }
     fail_after(0);
+    {
+        unsigned before=remaining;
+        vm_host_fail_phys_access_for(free_frame_at(1));
+        assert(!vm_space_anonymous(&source,1));
+        assert(source.anon_pages==0 && remaining==before);
+        assert(vm_space_validate(&source));
+    }
     uint64_t anon=vm_space_anonymous(&source,2);
     assert(anon);
     uint64_t *leaves=words(source.pt);
@@ -237,6 +274,16 @@ int main(void){
     assert(!vm_space_copyout(&source,anon,&change,1));
     assert(vm_space_copyin(&source,&read_back,anon,1) && read_back==0);
     assert(vm_space_unmap_anonymous(&source,anon,2));
+    /* Partial unmap leaves a reusable hole; filling it must keep the
+     * surrounding anonymous pages and ownership bitmap intact. */
+    unsigned before_fragment=remaining;
+    uint64_t arena=vm_space_anonymous(&source,8);
+    assert(arena && vm_space_validate(&source));
+    assert(vm_space_unmap_anonymous(&source,arena+3*PAGE,1));
+    uint64_t refill=vm_space_anonymous(&source,1);
+    assert(refill==arena+3*PAGE && vm_space_validate(&source));
+    assert(vm_space_unmap_anonymous(&source,arena,8));
+    assert(remaining==before_fragment && vm_space_validate(&source));
     /* A partially invalid cross-page range must not modify its first page.
      * The copy routine validates the COMPLETE destination before copying. */
     uint64_t a=page_alloc();assert(a && vm_space_map(&source,4,a,true,false));
@@ -245,6 +292,15 @@ int main(void){
     uint8_t read_one=0;
     assert(!vm_space_copyout(&source,VM_USER_BASE+5*PAGE-8,cross,sizeof cross));
     assert(vm_space_copyin(&source,&read_one,VM_USER_BASE+5*PAGE-8,1) && read_one==0xa5);
+    uint64_t second=page_alloc();assert(second && vm_space_map(&source,5,second,true,false));
+    vm_host_fail_phys_access_for(second);
+    assert(!vm_space_copyout(&source,VM_USER_BASE+5*PAGE-8,cross,sizeof cross));
+    uint8_t untouched[8];memset(untouched,0,sizeof untouched);
+    assert(vm_space_copyin(&source,untouched,VM_USER_BASE+5*PAGE-8,sizeof untouched));
+    for(unsigned i=0;i<sizeof untouched;i++)assert(untouched[i]==0xa5);
+    assert(page_release_mapping(second) && page_free(second));
+    words(source.pt)[5]=0;
+    source.owned[5]=0;
     /* A page-table page cannot be aliased into userspace. */
     assert(!vm_space_map(&source,5,source.pt,true,false));
     assert(!vm_space_map(&source,5,source.pml4,true,false));
@@ -276,7 +332,7 @@ int main(void){
     assert(vm_space_validate(&source));
     /* Repeat eager fork and anonymous map/release and verify no frames are
      * lost. This remains a deterministic host stress, not real CR3/IRQ. */
-    for(unsigned repeat=0;repeat<300;repeat++) {
+    for(unsigned repeat=0;repeat<2000;repeat++) {
         struct vm_space attempt={0};
         unsigned before_cycle=remaining;
         assert(vm_space_clone(&attempt,&source));

@@ -69,6 +69,7 @@ static int mark_node_blocks(struct kilofs *fs,const struct kfs_node *node,
  * called, so a cleanly recovered image is checked in its post-transaction
  * state. This entry point is read-only; repair is deliberately narrower. */
 int kfs_fsck(struct kilofs *fs,unsigned *errors){
+    KFS_GUARD(fs);
     if(!fs||!errors||!fs->mounted)return -K_EINVAL;
     unsigned bad=0;uint8_t *blocks=fs->audit_blocks,*inodes=fs->audit_inodes;
     uint8_t *seen=fs->audit_seen;
@@ -148,6 +149,7 @@ int kfs_fsck(struct kilofs *fs,unsigned *errors){
  * bits, malformed pointers, duplicate blocks and orphan inodes are refused;
  * repair never guesses how to destroy potentially live data. */
 int kfs_fsck_repair(struct kilofs *fs,unsigned *errors){
+    KFS_GUARD(fs);
     if(!fs||!errors||!fs->mounted)return -K_EINVAL;
     *errors=0;
     if(fs->readonly)return -K_EROFS;

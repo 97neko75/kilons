@@ -22,6 +22,7 @@ extern int errno;
 #define ECHILD 10
 #define EAGAIN 11
 #define EACCES 13
+#define EBUSY 16
 #define EDEADLK 35
 #define ENOLCK 37
 #define EINVAL 22

@@ -92,6 +92,9 @@ static struct task_io *lookup_io(uint32_t pid) {
     for(unsigned i=0;i<TASK_IO_SLOTS;i++)if(io[i].pid==pid && pid)return &io[i];
     return NULL;
 }
+static void clear_task_io(struct task_io *entry) {
+    if(entry)*entry=(struct task_io){.cwd_fd=-1};
+}
 /* Called with the process blocked or at the syscall boundary. Endpoint
  * flags belong to the open description, including all dup/fork aliases. */
 bool posix_blocking_pipe_writer(uint32_t pid,uint64_t fd) {
@@ -173,13 +176,7 @@ static int user_string(uint64_t p,char *dst,size_t cap) {
 }
 void posix_task_end(void) {
     if(!task_active)return;
-    record_exit(task_pid);
-    if(active_io->cwd_fd>=0)(void)vfs_close(active_io->cwd_fd);
-    for(unsigned i=0;i<FD_MAX;i++) if(task_fds[i].used)(void)fd_release(i);
-    for(unsigned i=0;i<TASK_IO_SLOTS;i++) if(io[i].pid==task_pid) {
-        io[i].pid=0;break;
-    }
-    task_active=0;task_fds=NULL;task_pid=0;active_io=NULL;vfs_set_credentials(0,0);
+    posix_task_discard(task_pid);
 }
 void posix_task_activate(uint32_t pid) {
     task_active=0;task_fds=NULL;task_pid=0;active_io=NULL;
@@ -200,11 +197,11 @@ bool posix_task_begin(uint32_t pid) {
     if(!slot){posix_task_activate(0);return false;}
     slot->pid=pid;
     posix_task_activate(pid);
-    if(!task_active){slot->pid=0;return false;}
+    if(!task_active){clear_task_io(slot);return false;}
     struct task_io *parent=lookup_io(process_parent_of(pid));
     slot->cwd_fd=parent?parent->cwd_fd:-1;
-    if(slot->cwd_fd>=0 && vfs_retain(slot->cwd_fd)<0) {
-        slot->pid=0;posix_task_activate(0);return false;
+    if(slot->cwd_fd>=0 && vfs_cwd_retain(slot->cwd_fd)<0) {
+        posix_task_activate(0);clear_task_io(slot);return false;
     }
     slot->uid=parent?parent->uid:1000;
     slot->gid=parent?parent->gid:1000;
@@ -262,7 +259,7 @@ bool posix_task_clone(uint32_t parent,uint32_t child) {
     struct task_io *dst=NULL;
     for(unsigned i=0;i<TASK_IO_SLOTS;i++)if(!io[i].pid){dst=&io[i];break;}
     if(!dst)return false;
-    if(src->cwd_fd>=0 && vfs_retain(src->cwd_fd)<0)return false;
+    if(src->cwd_fd>=0 && vfs_cwd_retain(src->cwd_fd)<0)return false;
     *dst=*src;dst->pid=child;
     for(int i=0;i<FD_MAX;i++)if(dst->fd[i].used) {
         if(dst->fd_flags[i]&FD_CLOFORK) {
@@ -277,8 +274,8 @@ bool posix_task_clone(uint32_t parent,uint32_t child) {
                 if(prior>=0)(void)vfs_close(prior);
                 else if(pipe_id(prior)>=0)pipe_release(prior);
             }
-            if(dst->cwd_fd>=0)(void)vfs_close(dst->cwd_fd);
-            dst->pid=0;return false;
+            if(dst->cwd_fd>=0)(void)vfs_cwd_release(dst->cwd_fd);
+            clear_task_io(dst);return false;
         }
         if(pipe_id(backend)>=0)pipe_retain(backend);
     }
@@ -298,8 +295,8 @@ void posix_task_discard(uint32_t pid) {
         if(locked){record_close(pid,file);if(last)record_close(-backend,file);}
         entry->fd[i].used=0;
     }
-    if(entry->cwd_fd>=0)(void)vfs_close(entry->cwd_fd);
-    entry->pid=0;
+    if(entry->cwd_fd>=0)(void)vfs_cwd_release(entry->cwd_fd);
+    clear_task_io(entry);
     if(task_pid==pid) {
         task_active=0;task_fds=NULL;task_pid=0;active_io=NULL;
         vfs_set_credentials(0,0);
@@ -768,7 +765,9 @@ long posix_dispatch(uint64_t nr,uint64_t a,uint64_t b,uint64_t c) {
                 return 0;
             }
             (void)vfs_set_nonblock(task_fds[a].backend,!!(c&O_NONBLOCK));
-            return vfs_set_append(task_fds[a].backend,!!(c&O_APPEND))<0?-EBADF:0;
+            if(vfs_set_append(task_fds[a].backend,!!(c&O_APPEND))<0)return -EBADF;
+            vfs_set_sync(task_fds[a].backend,(unsigned)c&O_SYNC);
+            return 0;
         }
         if(b==F_DUPFD || b==F_DUPFD_CLOEXEC || b==F_DUPFD_CLOFORK) { /* F_DUPFD / F_DUPFD_CLOEXEC */
             if(c>=FD_MAX)return -EINVAL;
@@ -797,7 +796,7 @@ long posix_dispatch(uint64_t nr,uint64_t a,uint64_t b,uint64_t c) {
         return vfs_fchmod(task_fds[a].backend,(unsigned)b)<0?-vfs_errno():0;
     }
     if(nr==80 || nr==81) {
-        int fd;
+        int fd,new_reference=0;
         if(nr==80) {
             char full[256];
             struct vfs_base base={0};
@@ -805,6 +804,10 @@ long posix_dispatch(uint64_t nr,uint64_t a,uint64_t b,uint64_t c) {
             if(rc)return rc;
             fd=vfs_open_mode_from(base,full,VFS_READ|VFS_DIRECTORY|VFS_EXEC,0,0);
             if(fd<0)return -vfs_errno();
+            if(vfs_cwd_mark(fd)<0) {
+                int err=vfs_errno();(void)vfs_close(fd);return -(long)err;
+            }
+            new_reference=1;
         } else {
             if(!valid_fd(a))return -EBADF;
             fd=task_fds[a].backend;
@@ -812,9 +815,15 @@ long posix_dispatch(uint64_t nr,uint64_t a,uint64_t b,uint64_t c) {
             struct vfs_info info;
             if(vfs_fstat(fd,&info)<0)return -vfs_errno();
             if(!info.is_dir)return -K_ENOTDIR;
-            if((task_fds[a].mode!=O_SEARCH && vfs_faccess(fd,1)<0) || vfs_retain(fd)<0)return -vfs_errno();
+            if(task_fds[a].mode!=O_SEARCH && vfs_faccess(fd,1)<0)return -vfs_errno();
+            if(vfs_cwd_retain(fd)<0)return -vfs_errno();
+            new_reference=1;
         }
-        if(active_io->cwd_fd>=0)(void)vfs_close(active_io->cwd_fd);
+        if(active_io->cwd_fd>=0 && vfs_cwd_release(active_io->cwd_fd)<0) {
+            int err=vfs_errno();
+            if(new_reference)(void)vfs_cwd_release(fd);
+            return -(long)err;
+        }
         active_io->cwd_fd=fd;
         return 0;
     }

@@ -1,5 +1,5 @@
 #!/bin/sh
-# 0.4.0-2 boot acceptance gate (NOT an exhaustive guest stress test).
+# 0.4.1 boot acceptance gate (NOT an exhaustive guest stress test).
 # Requires make iso and QEMU. Nothing writes to a physical disk.
 set -eu
 command -v qemu-system-x86_64 >/dev/null || { echo 'QEMU required for guest validation' >&2; exit 77; }

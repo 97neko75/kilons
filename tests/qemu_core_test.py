@@ -43,12 +43,8 @@ def send_keys(monitor, keys):
 
         wait_prompt()
         for key in keys:
-            # Keep one HMP session alive and wait for its prompt.  Closing a
-            # socket immediately after sendkey can discard the command on
-            # some QEMU builds before the guest input event is queued.
-            # Keep the key pressed briefly.  This is the timing used by the
-            # previously passing guest test and avoids losing the make/break
-            # pair between QEMU's HMP monitor and the emulated PS/2 device.
+            # Use an explicit hold time and await the monitor's response.
+            # Acknowledgement confirms submission, not guest consumption.
             console.sendall(f"sendkey {key} 30\n".encode())
             response = wait_prompt()
             if b"Error" in response or b"error" in response:
@@ -58,8 +54,14 @@ def send_keys(monitor, keys):
 
 
 def exercise(iso, initramfs=False):
+    log_dir = pathlib.Path(iso).resolve().parent / "guest-logs"
+    log_dir.mkdir(parents=True, exist_ok=True)
+    mode = "initramfs" if initramfs else "rootfs"
+    with tempfile.NamedTemporaryFile(prefix=mode + "-", suffix=".log",
+                                     dir=log_dir, delete=False) as output:
+        log = pathlib.Path(output.name)
+    print(f"Guest serial log: {log}", flush=True)
     with tempfile.TemporaryDirectory(prefix="kilons-guest-") as temp:
-        log = pathlib.Path(temp) / "serial"
         monitor = pathlib.Path(temp) / "monitor"
         args = ["qemu-system-x86_64", "-cdrom", iso, "-m", "256M", "-no-reboot",
                 "-display", "none", "-serial", f"file:{log}",
@@ -75,7 +77,8 @@ def exercise(iso, initramfs=False):
                     if guest.poll() is not None or b"kregress: FAIL" in data:
                         break
                     time.sleep(0.1)
-                raise RuntimeError(log.read_text(errors="replace") if log.exists() else "No serial log")
+                raise RuntimeError(f"Guest did not reach {marker!r}; log: {log}\n" +
+                                   log.read_text(errors="replace"))
             try:
                 if initramfs:
                     # The top-level default is the full rootfs entry. Move to
@@ -98,10 +101,14 @@ def exercise(iso, initramfs=False):
                     if b"kregress: PASS" in data:
                         raise RuntimeError(log.read_text(errors="replace"))
                 else:
-                    wait_for(b"pks$ ")
+                    offset = wait_for(b"pks$ ")
                     send_keys(monitor, ("t", "e", "s", "t", "1", "9", "ret"))
-                    offset = 0
-                    for marker in (b"intrcheck: PASS", b"vfork/fexecve", b"posixcheck: PASS", b"kregress: PASS", b"pks$ "):
+                    for marker in (b"intrcheck: PASS", b"vfork/fexecve", b"posixcheck: PASS",
+                                   b"kregress: process/memory lifecycle PASS",
+                                   b"kregress: PASS", b"pks$ "):
+                        offset = wait_for(marker, offset)
+                    send_keys(monitor, ("s", "t", "r", "e", "s", "s", "ret"))
+                    for marker in (b"kregress: process/memory stress PASS", b"pks$ "):
                         offset = wait_for(marker, offset)
                 print(log.read_text(errors="replace"))
             finally:
@@ -111,6 +118,7 @@ def exercise(iso, initramfs=False):
                         guest.wait(timeout=3)
                     except subprocess.TimeoutExpired:
                         guest.kill()
+                        guest.wait()
 
 
 if __name__ == "__main__":

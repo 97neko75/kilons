@@ -11,6 +11,7 @@ static int busy_inode(struct kilofs *fs,uint32_t ino){
     return 0;
 }
 int kfs_open(struct kilofs *fs,const char *path,unsigned flags,int create,unsigned mode){
+    KFS_GUARD(fs);
     if(!fs||!fs->mounted||!path||!(flags&(KFS_READ|KFS_WRITE))||
        (flags&~(KFS_READ|KFS_WRITE)))return -K_EINVAL;
     if(fs->readonly&&(flags&KFS_WRITE))return -K_EROFS;
@@ -39,6 +40,7 @@ int kfs_open(struct kilofs *fs,const char *path,unsigned flags,int create,unsign
     return (int)slot;
 }
 int kfs_close(struct kilofs *fs,int fd){
+    KFS_GUARD(fs);
     if(!fs||fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     uint32_t ino=fs->handles[fd].ino;
     struct kfs_node n;int rc=kfs_inode_load(fs,ino,&n);
@@ -51,6 +53,7 @@ int kfs_close(struct kilofs *fs,int fd){
     return 0;
 }
 int kfs_read(struct kilofs *fs,int fd,void *buf,size_t count){
+    KFS_GUARD(fs);
     if(!fs||fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     struct kfs_handle *h=&fs->handles[fd];
     if(!(h->flags&KFS_READ))return -K_EBADF;
@@ -65,6 +68,7 @@ int kfs_read(struct kilofs *fs,int fd,void *buf,size_t count){
     return rc;
 }
 int kfs_write(struct kilofs *fs,int fd,const void *buf,size_t count){
+    KFS_GUARD(fs);
     if(!fs||fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     struct kfs_handle *h=&fs->handles[fd];
     if(!(h->flags&KFS_WRITE))return -K_EBADF;
@@ -80,6 +84,7 @@ int kfs_write(struct kilofs *fs,int fd,const void *buf,size_t count){
     return rc;
 }
 int kfs_seek(struct kilofs *fs,int fd,uint64_t offset){
+    KFS_GUARD(fs);
     if(!fs||fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     /* Seeking alone does not allocate blocks or grow the file. */
     fs->handles[fd].offset=offset;return 0;
@@ -92,6 +97,7 @@ static int info_from_node(struct kilofs *fs,uint32_t ino,const struct kfs_node *
     out->kind=n->kind;out->mode=n->mode;out->size=n->size;return 0;
 }
 int kfs_fstat(struct kilofs *fs,int fd,struct kfs_info *out){
+    KFS_GUARD(fs);
     if(!fs||!out)return -K_EFAULT;
     if(fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     struct kfs_node n;uint32_t ino=fs->handles[fd].ino;
@@ -99,12 +105,14 @@ int kfs_fstat(struct kilofs *fs,int fd,struct kfs_info *out){
     return info_from_node(fs,ino,&n,out);
 }
 int kfs_stat(struct kilofs *fs,const char *path,struct kfs_info *out){
+    KFS_GUARD(fs);
     if(!fs||!out||!path)return -K_EINVAL;
     uint32_t ino;struct kfs_node n;
     int rc=get_node(fs,path,&ino,&n);if(rc<0)return rc;
     return info_from_node(fs,ino,&n,out);
 }
 int kfs_readdir(struct kilofs *fs,const char *path,unsigned idx,struct kfs_dirent *out){
+    KFS_GUARD(fs);
     if(!out)return -K_EFAULT;
     uint32_t ino;struct kfs_node n;int rc=get_node(fs,path,&ino,&n);if(rc<0)return rc;
     return kfs_dir_index(fs,ino,idx,out);
@@ -141,13 +149,16 @@ static int create_node(struct kilofs *fs,const char *path,unsigned mode,const ch
     return 0;
 }
 int kfs_mkdir(struct kilofs *fs,const char *path,unsigned mode) {
+    KFS_GUARD(fs);
     return create_node(fs,path,mode,0);
 }
 int kfs_symlink(struct kilofs *fs,const char *target,const char *path) {
+    KFS_GUARD(fs);
     if(!target)return -K_EFAULT;
     return create_node(fs,path,0777,target);
 }
 int kfs_readlink(struct kilofs *fs,const char *path,char *buf,size_t size) {
+    KFS_GUARD(fs);
     struct kfs_node node;
     uint32_t ino;
     int rc=get_node(fs,path,&ino,&node);
@@ -157,6 +168,7 @@ int kfs_readlink(struct kilofs *fs,const char *path,char *buf,size_t size) {
     return kfs_read_bytes(fs,&node,0,buf,size);
 }
 int kfs_link(struct kilofs *fs,const char *source,const char *dest) {
+    KFS_GUARD(fs);
     if(!fs || fs->readonly)return -K_EROFS;
     uint32_t ino,parent;
     struct kfs_node node;
@@ -196,16 +208,23 @@ static int delete_entry(struct kilofs *fs,const char *path,int directory){
     if(!n.links && !busy_inode(fs,ino))return kfs_drop_inode(fs,ino,&n);
     return 0;
 }
-int kfs_unlink(struct kilofs *fs,const char *path){return delete_entry(fs,path,0);}
-int kfs_rmdir(struct kilofs *fs,const char *path){return delete_entry(fs,path,1);}
+int kfs_unlink(struct kilofs *fs,const char *path){
+    KFS_GUARD(fs);
+    return delete_entry(fs,path,0);
+}
+int kfs_rmdir(struct kilofs *fs,const char *path){
+    KFS_GUARD(fs);
+    return delete_entry(fs,path,1);
+}
 int kfs_rename(struct kilofs *fs,const char *oldpath,const char *newpath){
+    KFS_GUARD(fs);
     if(!fs||fs->readonly)return -K_EROFS;
     uint32_t oldparent,newparent;char oldname[KFS_NAME_MAX+1],newname[KFS_NAME_MAX+1];
     int rc=kfs_parent(fs,oldpath,&oldparent,oldname);if(rc<0)return rc;
     rc=kfs_parent(fs,newpath,&newparent,newname);if(rc<0)return rc;
-    if(oldparent==newparent&&kfs_equal(oldname,newname))return 0;
     uint32_t ino;uint8_t kind;
     rc=kfs_dir_find(fs,oldparent,oldname,&ino,&kind);if(rc<0)return rc;
+    if(oldparent==newparent&&kfs_equal(oldname,newname))return 0;
     uint32_t unused;rc=kfs_dir_find(fs,newparent,newname,&unused,0);
     int replacing=rc==0;
     struct kfs_node victim={0};
@@ -225,13 +244,15 @@ int kfs_rename(struct kilofs *fs,const char *oldpath,const char *newpath){
     struct kfs_node n;rc=kfs_inode_load(fs,ino,&n);if(rc<0)return rc;
     if(kind==KFS_KIND_DIR){
         uint32_t p=newparent;
-        for(unsigned i=0;i<KFS_INODES;i++){
+        unsigned depth;
+        for(depth=0;depth<KFS_INODES;depth++){
             if(p==ino)return -K_EINVAL;
             if(p==KFS_ROOT)break;
             struct kfs_node parent_node;rc=kfs_inode_load(fs,p,&parent_node);if(rc<0)return rc;
-            if(parent_node.parent==p)return -K_EIO;
+            if(parent_node.kind!=KFS_KIND_DIR || parent_node.parent==p)return -K_EIO;
             p=parent_node.parent;
         }
+        if(depth==KFS_INODES)return -K_EIO;
     }
     if(replacing) {
         rc=kfs_dir_remove(fs,newparent,newname);
@@ -260,11 +281,13 @@ restore_dest:
     return rc;
 }
 int kfs_truncate(struct kilofs *fs,const char *path,uint64_t size){
+    KFS_GUARD(fs);
     uint32_t ino;struct kfs_node n;int rc=get_node(fs,path,&ino,&n);if(rc<0)return rc;
     if(n.kind!=KFS_KIND_FILE)return -K_EISDIR;
     return kfs_resize(fs,ino,&n,size);
 }
 int kfs_ftruncate(struct kilofs *fs,int fd,uint64_t size){
+    KFS_GUARD(fs);
     if(!fs||fd<0||fd>=(int)KFS_HANDLES||!fs->handles[fd].used)return -K_EBADF;
     if(!(fs->handles[fd].flags&KFS_WRITE))return -K_EBADF;
     uint32_t ino=fs->handles[fd].ino;
@@ -272,6 +295,7 @@ int kfs_ftruncate(struct kilofs *fs,int fd,uint64_t size){
     return kfs_resize(fs,ino,&n,size);
 }
 int kfs_update_metadata(struct kilofs *fs,const char *path,int fd,const struct inode_update *update) {
+    KFS_GUARD(fs);
     if(!fs||!update)return -K_EFAULT;
     if(fs->readonly)return -K_EROFS;
     uint32_t ino;
@@ -294,6 +318,7 @@ int kfs_update_metadata(struct kilofs *fs,const char *path,int fd,const struct i
     return kfs_inode_save(fs,ino,&node);
 }
 int kfs_fchmod(struct kilofs *fs,int fd,unsigned mode) {
+    KFS_GUARD(fs);
     if(!fs || fd<0 || fd>=(int)KFS_HANDLES || !fs->handles[fd].used)return -K_EBADF;
     if(fs->readonly)return -K_EROFS;
     uint32_t ino=fs->handles[fd].ino;
@@ -304,6 +329,7 @@ int kfs_fchmod(struct kilofs *fs,int fd,unsigned mode) {
     return kfs_inode_save(fs,ino,&node);
 }
 int kfs_chmod(struct kilofs *fs,const char *path,unsigned mode){
+    KFS_GUARD(fs);
     if(!fs||fs->readonly)return -K_EROFS;
     uint32_t ino;struct kfs_node n;int rc=get_node(fs,path,&ino,&n);if(rc<0)return rc;
     n.times.change=file_now();n.mode=(uint16_t)(mode&07777U);return kfs_inode_save(fs,ino,&n);

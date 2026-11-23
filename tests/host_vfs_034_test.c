@@ -1,4 +1,4 @@
-/* v0.4.0-2 VFS pathname/permissions/lseek/cache + MBR FAT32 integration.
+/* v0.4.1 VFS pathname/permissions/lseek/cache + MBR FAT32 integration.
  * Synthetic disk is a host memory callback; no physical drive is written. */
 #include <kilons/vfs.h>
 #include <kilons/ramfs.h>
@@ -82,6 +82,57 @@ int main(void){
     assert(vfs_stat("/tmp/trailing-dir/",&(struct vfs_info){0})==0);
     assert(vfs_open("/tmp/trailing-dir/newfile/",VFS_WRITE,1)==-1 && vfs_errno()==K_ENOTDIR);
     assert(vfs_rmdir("/tmp/trailing-dir/")==0);
+    assert(vfs_mkdir("/tmp/link-semantics")==0);
+    assert(vfs_mkdir("/tmp/link-semantics/target")==0);
+    file=vfs_open("/tmp/link-semantics/target/file",VFS_WRITE,1);
+    assert(file>=3 && vfs_close(file)==0);
+    assert(vfs_symlink("target","/tmp/link-semantics/relative")==0);
+    assert(vfs_symlink("/tmp/link-semantics/target","/tmp/link-semantics/absolute")==0);
+    assert(vfs_symlink("missing","/tmp/link-semantics/dangling")==0);
+    assert(vfs_symlink("cycle-b","/tmp/link-semantics/cycle-a")==0);
+    assert(vfs_symlink("cycle-a","/tmp/link-semantics/cycle-b")==0);
+    struct vfs_info link_info,target_info;
+    assert(vfs_lstat("/tmp/link-semantics/relative",&link_info)==0 &&
+           (link_info.mode&0170000U)==0120000U);
+    assert(vfs_stat("/tmp/link-semantics/relative/",&target_info)==0 && target_info.is_dir);
+    assert(vfs_lstat("/tmp/link-semantics/relative/",&target_info)==0 && target_info.is_dir);
+    assert(vfs_stat("/tmp/link-semantics/absolute",&target_info)==0 && target_info.is_dir);
+    assert(vfs_lstat("/tmp/link-semantics/dangling",&link_info)==0 &&
+           (link_info.mode&0170000U)==0120000U);
+    assert(vfs_stat("/tmp/link-semantics/dangling",&target_info)==-1 && vfs_errno()==K_ENOENT);
+    assert(vfs_stat("/tmp/link-semantics/cycle-a",&target_info)==-1 && vfs_errno()==K_ELOOP);
+    char link_bytes[8]={'!','!','!','!','!','!','!','!'};
+    assert(vfs_readlink("/tmp/link-semantics/relative",link_bytes,3)==3 &&
+           !memcmp(link_bytes,"tar",3) && link_bytes[3]=='!');
+    assert(vfs_unlink("/tmp/link-semantics/relative/")==-1 && vfs_errno()==K_EISDIR);
+    assert(vfs_rmdir("/tmp/link-semantics/relative/")==-1 && vfs_errno()==K_ENOTEMPTY);
+    assert(vfs_lstat("/tmp/link-semantics/relative",&link_info)==0);
+    int link_dir=vfs_open("/tmp/link-semantics/relative/",VFS_READ|VFS_DIRECTORY|VFS_EXEC,0);
+    assert(link_dir>=3 && vfs_close(link_dir)==0);
+    assert(vfs_unlink("/tmp/link-semantics/cycle-a")==0);
+    assert(vfs_unlink("/tmp/link-semantics/cycle-b")==0);
+    assert(vfs_unlink("/tmp/link-semantics/dangling")==0);
+    assert(vfs_unlink("/tmp/link-semantics/relative")==0);
+    assert(vfs_unlink("/tmp/link-semantics/absolute")==0);
+    assert(vfs_unlink("/tmp/link-semantics/target/file")==0);
+    assert(vfs_rmdir("/tmp/link-semantics/target")==0);
+    assert(vfs_rmdir("/tmp/link-semantics")==0);
+    assert(vfs_mkdir("/tmp/rename-parent")==0);
+    assert(vfs_mkdir("/tmp/rename-parent/source")==0);
+    assert(vfs_mkdir("/tmp/rename-parent/source/child")==0);
+    assert(vfs_rename("/tmp/rename-parent/source","/tmp/rename-parent/source/child/moved")==-1 &&
+           vfs_errno()==K_EINVAL);
+    assert(vfs_mkdir("/tmp/rename-parent/dest")==0);
+    link_dir=vfs_open("/tmp/rename-parent/dest",VFS_READ|VFS_DIRECTORY|VFS_EXEC,0);
+    assert(link_dir>=3);
+    assert(vfs_rename("/tmp/rename-parent/source","/tmp/rename-parent/dest")==0);
+    assert(vfs_stat("/tmp/rename-parent/dest/child",&target_info)==0 && target_info.is_dir);
+    assert(vfs_fstat(link_dir,&target_info)==0 && target_info.is_dir && target_info.links==0);
+    assert(vfs_directory_path(link_dir)==NULL && vfs_errno()==K_ENOENT);
+    assert(vfs_close(link_dir)==0);
+    assert(vfs_rmdir("/tmp/rename-parent/dest/child")==0);
+    assert(vfs_rmdir("/tmp/rename-parent/dest")==0);
+    assert(vfs_rmdir("/tmp/rename-parent")==0);
     vfs_set_credentials(1000,1000);
     assert(vfs_mkdir_mode("/tmp/user",0700)==0);
     file=vfs_open_mode("/tmp/user/secret",VFS_READ|VFS_WRITE,1,0600);
@@ -116,13 +167,24 @@ int main(void){
      * another user's entries, even when parent W+X grants traversal. */
     int owned=vfs_open("/tmp/sticky-owned",VFS_READ|VFS_WRITE,1);
     assert(owned>=3 && vfs_close(owned)==0);
+    assert(vfs_mkdir_mode("/tmp/sticky-source-dir",0777)==0);
+    owned=vfs_open_mode("/tmp/sticky-source-dir/source",VFS_READ|VFS_WRITE,1,0600);
+    assert(owned>=3 && vfs_close(owned)==0);
+    owned=vfs_open_mode("/tmp/sticky-destination",VFS_READ|VFS_WRITE,1,0600);
+    assert(owned>=3 && vfs_close(owned)==0);
     assert(vfs_mkdir("/tmp/sticky-directory")==0);
     vfs_set_credentials(2000,2000);
     assert(vfs_unlink("/tmp/sticky-owned")==-1 && vfs_errno()==K_EPERM);
     assert(vfs_rename("/tmp/sticky-owned","/tmp/sticky-renamed")==-1 && vfs_errno()==K_EPERM);
+    assert(vfs_rename("/tmp/sticky-source-dir/source","/tmp/sticky-new-name")==-1 && vfs_errno()==K_EPERM);
+    assert(vfs_rename("/tmp/sticky-source-dir/source","/tmp/sticky-destination")==-1 && vfs_errno()==K_EPERM);
     assert(vfs_rmdir("/tmp/sticky-directory")==-1 && vfs_errno()==K_EPERM);
     vfs_set_credentials(1000,1000);
     assert(vfs_rmdir("/tmp/sticky-directory")==0);
+    assert(vfs_rename("/tmp/sticky-source-dir/source","/tmp/sticky-new-name")==0);
+    assert(vfs_unlink("/tmp/sticky-new-name")==0);
+    assert(vfs_unlink("/tmp/sticky-destination")==0);
+    assert(vfs_rmdir("/tmp/sticky-source-dir")==0);
     assert(vfs_unlink("/tmp/sticky-owned")==0);
     /* Synthetic MBR partition, all reads go through the block mapping. */
     struct block_device d={START+TOTAL+5,disk_read,0,0};
@@ -155,6 +217,6 @@ int main(void){
     assert(vfs_access("/mnt/disk/HELLO.TXT",2)==-1 && vfs_errno()==K_EROFS);
     assert(vfs_unlink("/mnt/disk/HELLO.TXT")==-1 && vfs_errno()==K_EROFS);
     assert(vfs_rmdir("/mnt/disk")==-1);
-    puts("v0.4.0-2 pathname/inode/dentry/permissions/lseek/MBR/read-only FAT32 PASS");
+    puts("v0.4.1 pathname/inode/dentry/permissions/lseek/MBR/read-only FAT32 PASS");
     return 0;
 }

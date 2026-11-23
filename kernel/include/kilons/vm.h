@@ -20,6 +20,8 @@ bool vm_user_init(void);
 #ifdef KILONS_HOST_TEST
 /* HOST TEST ONLY: emulate CR3 without privileged instructions. */
 void vm_host_set_cr3(uint64_t phys);
+/* Fail one host physical alias lookup to exercise rollback paths. */
+void vm_host_fail_phys_access_for(uint64_t phys);
 #endif
 bool vm_space_selftest(void);
 bool vm_space_create(struct vm_space *space);

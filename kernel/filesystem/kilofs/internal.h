@@ -2,6 +2,7 @@
 #define KILOFS_INTERNAL_H
 #include <kilons/kilofs.h>
 #include <kilons/kerrno.h>
+#include <kilons/irq_guard.h>
 #define KFS_MAGIC 0x3153464bU /* 'KFS1' little endian */
 #define KFS_JOURNAL_MAGIC 0x314c4e4aU /* 'JNL1' little endian */
 #define KFS_JOURNAL_VERSION 2U
@@ -32,6 +33,27 @@ static inline int kfs_name_bytes_valid(const uint8_t *p,unsigned len){
     for(unsigned i=0;i<len;i++)if(!p[i]||p[i]=='/')return 0;
     return 1;
 }
+struct kfs_guard { struct kilofs *fs; };
+static inline struct kfs_guard kfs_guard_enter(struct kilofs *fs){
+    struct kfs_guard guard={fs};
+    if(fs && fs->guard_depth++==0){
+#if !__STDC_HOSTED__
+        fs->guard_flags=kilons_irq_save();
+#endif
+    }
+    return guard;
+}
+static inline void kfs_guard_leave(struct kfs_guard *guard){
+    if(!guard||!guard->fs||!guard->fs->guard_depth)return;
+    if(--guard->fs->guard_depth==0){
+#if !__STDC_HOSTED__
+        kilons_irq_restore(guard->fs->guard_flags);
+#endif
+    }
+}
+#define KFS_GUARD(fs) \
+    struct kfs_guard kfs_guard_scope __attribute__((cleanup(kfs_guard_leave))) = \
+        kfs_guard_enter(fs)
 int kfs_cache_read(struct kilofs *,uint32_t,uint8_t *);
 int kfs_cache_write(struct kilofs *,uint32_t,const uint8_t *);
 int kfs_cache_flush(struct kilofs *);

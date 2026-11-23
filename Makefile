@@ -42,7 +42,7 @@ $(BUILD)/serial.o: kernel/drivers/serial.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/physical.o: kernel/memory/physical.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/keyboard.o: kernel/drivers/keyboard.c | $(BUILD)
+$(BUILD)/keyboard.o: kernel/drivers/keyboard.c kernel/include/kilons/irq_guard.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/interrupt.o: kernel/arch/interrupt.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -64,11 +64,11 @@ $(BUILD)/fat32.o: kernel/filesystem/fat32.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/ramfs.o: kernel/filesystem/ramfs.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/vfs.o: kernel/filesystem/vfs/vfs.c include/dirent.h | $(BUILD)
+$(BUILD)/vfs.o: kernel/filesystem/vfs/vfs.c include/dirent.h kernel/include/kilons/irq_guard.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/iso9660.o: kernel/filesystem/iso9660.c | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
-$(BUILD)/power.o: kernel/arch/amd64/power.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h | $(BUILD)
+$(BUILD)/power.o: kernel/arch/amd64/power.c kernel/include/kilons/memory.h kernel/include/kilons/limine.h kernel/include/kilons/power.h kernel/include/kilons/io.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/context.o: boot/amd64/context.S | $(BUILD)
 	$(CC) $(ASFLAGS) -c $< -o $@
@@ -80,6 +80,8 @@ iso: all rootfs-kilofs initramfs-kilofs $(LIMINE_READY)
 	mkdir -p $(ISO_LIMINE_DIR) $(ISO_BOOT_DIR) $(ISO_DIR)/EFI/BOOT
 	cp $(BUILD)/kilons.elf $(ISO_KERNEL_IMAGE)
 	cp boot/limine/limine.conf $(ISO_LIMINE_DIR)/limine.conf
+	cp $(LIMINE_BINARY)/LICENSE $(LIMINE_BINARY)/3RDPARTY.md $(ISO_LIMINE_DIR)/
+	cp kernel/drivers/console_font.LICENSE $(ISO_BOOT_DIR)/console_font.LICENSE
 	cp $(ROOTFS) $(ISO_ROOTFS_IMAGE)
 	cp $(INITRAMFS_KILOFS) $(ISO_INITRAMFS_IMAGE)
 	cp $(LIMINE_BINARY)/limine-bios.sys $(ISO_LIMINE_DIR)/limine-bios.sys
@@ -95,7 +97,7 @@ iso: all rootfs-kilofs initramfs-kilofs $(LIMINE_READY)
 		$(ISO_DIR) -o $(BUILD)/kilons.iso
 	$(LIMINE_BINARY)/limine bios-install $(BUILD)/kilons.iso
 
-$(LIMINE_ARCHIVE): | $(BUILD)
+$(LIMINE_ARCHIVE): $(wildcard $(LIMINE_VENDOR_ARCHIVE)) | $(BUILD)
 	@set -eu; \
 	mkdir -p $(LIMINE_ROOT); \
 	tmp=$$(mktemp -- $(LIMINE_ARCHIVE).XXXXXX); \
@@ -198,7 +200,7 @@ tools-kilofs: $(BUILD)/mkfs.kilofs $(BUILD)/fsck.kilofs
 # kilofs partitions read-only; no automatic format or disk writes.
 KFS_KERNEL_OBJS := $(addprefix $(BUILD)/kfs_,$(addsuffix .o,disk alloc inode directory file vfs_adapter fsck block_adapter))
 OBJS += $(KFS_KERNEL_OBJS)
-$(BUILD)/kfs_%.o: kernel/filesystem/kilofs/%.c | $(BUILD)
+$(BUILD)/kfs_%.o: kernel/filesystem/kilofs/%.c kernel/filesystem/kilofs/internal.h kernel/include/kilons/kilofs.h kernel/include/kilons/irq_guard.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
 $(BUILD)/kilons.elf: $(KFS_KERNEL_OBJS)
 .PHONY: check-vfs-kilofs
@@ -373,11 +375,18 @@ check-exec: | $(BUILD)
 $(addprefix $(BUILD)/user_,$(addsuffix .elf,$(USER_ROOTFS_PROGRAMS) init)): include/exec_limits.h include/record_lock.h
 
 .PHONY: check-core check-core-guest
-check-core: all rootfs-kilofs initramfs-kilofs
+check-core: all rootfs-kilofs initramfs-kilofs check-console-input
 	$(MAKE) check check-exec check-pks check-p0 check-kilofs check-kilofs-fault check-vfs-kilofs check-boot-root check-initramfs check-boot-corrupt check-boot-menu check-sysroot
 check-core-guest: iso
 	python3 tests/qemu_core_test.py $(BUILD)/kilons.iso
 	python3 tests/qemu_core_test.py --initramfs $(BUILD)/kilons.iso
+
+.PHONY: check-console-input
+check-console-input: | $(BUILD)
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_console_test.c -o $(BUILD)/host_console_test
+	$(BUILD)/host_console_test
+	$(CC) -std=c11 -O2 -Wall -Wextra -Werror -Ikernel/include tests/host_keyboard_test.c -o $(BUILD)/host_keyboard_test
+	$(BUILD)/host_keyboard_test
 
 $(BUILD)/user_signal.o: kernel/process/user_signal.c kernel/include/kilons/user_signal.h include/signal_numbers.h | $(BUILD)
 	$(CC) $(CFLAGS) -c $< -o $@
